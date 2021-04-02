@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from torch.distributions import Categorical
+from torchvision.transforms import ToTensor
 
 from models.decoders import SACAEDecoder
 from models.encoders import SACAEEncoder
@@ -83,8 +84,8 @@ class SACActorImages(nn.Module):
 # 		pass
 
 
-print(SACActorImages(state_cc=12, num_filters=32, num_convs=3, action_shape=4, is_discrete=True).sample_action(
-	torch.rand(1, 12, 84, 84)))
+# print(SACActorImages(state_cc=12, num_filters=32, num_convs=3, action_shape=4, is_discrete=True).sample_action(
+# 	torch.rand(1, 12, 84, 84)))
 
 
 class SACVNetworkImages(nn.Module):
@@ -193,6 +194,7 @@ class SACAgentImages:
 	def update(self, replay_buffer, step):
 
 		s, a, r, s_, t = replay_buffer.sample(self.batch_size)
+		# s =
 		# (1) Critic
 		self.update_critic(s.to(self.device), r.to(self.device), s_.to(self.device), t.to(self.device))
 

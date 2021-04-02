@@ -6,6 +6,8 @@ import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
+from collections import deque
+from torchvision.transforms import ToTensor
 
 
 def make_pca_plot(model, states, scaled_rewards, title, save_name):
@@ -84,8 +86,46 @@ def squash(mu, pi, log_pi):
         log_pi -= torch.log(F.relu(1 - pi.pow(2)) + 1e-6).sum(-1, keepdim=True)
     return mu, pi, log_pi
 
+
 def soft_update_params(net, target_net, tau):
     for param, target_param in zip(net.parameters(), target_net.parameters()):
         target_param.data.copy_(
             tau * param.data + (1 - tau) * target_param.data
         )
+
+
+class FrameStackEnv:
+    def __init__(self, env, k, data_type='np'):
+        self.frames = None
+        self.env = env
+        self.k = k
+        self.data_type = data_type
+
+        self.reset()
+
+    @property
+    def images(self):
+        return self.env.images
+
+    def reset(self):
+        if self.data_type == 'np':
+            self.frames = deque([self.env.reset() for _ in range(self.k)], maxlen=self.k)
+        else:
+            self.frames = deque([ToTensor()(self.env.reset()) for _ in range(self.k)])
+
+        # state = self.env.reset()
+        # self.frames.append(state)
+
+        return self._get_obs()
+
+    def step(self, action):
+        state, reward, picked_up, done, _ = self.env.step(action)
+        self.frames.append(state)
+
+        return self._get_obs(), reward, picked_up, done, _
+
+    def _get_obs(self):
+        if self.data_type == 'np':
+            return np.concatenate(list(self.frames), axis=2)
+        else:
+            return torch.cat(list(self.frames), axis=0)

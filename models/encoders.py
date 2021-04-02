@@ -173,3 +173,64 @@ class NatureCNN(nn.Module):
 # a = NatureCNN(3, encoder_features)
 #
 # a(torch.rand((32, 3, 224, 224)), fmaps=True)
+
+
+def tie_weights(src, tgt):
+    assert type(src) == type(tgt)
+    tgt.weight = src.weight
+    tgt.bias = src.bias
+
+
+class SACAEEncoder(nn.Module):
+    def __init__(self, state_cc, feature_dim, num_filters, device='cpu'):
+        super().__init__()
+
+
+        self.convs = nn.ModuleList(
+            [
+                nn.Conv2d(state_cc, num_filters, (7, 7), 5),
+                nn.Conv2d(num_filters, num_filters, (5, 5), 3),
+                nn.Conv2d(num_filters, num_filters, (5, 5), 3)
+            ]
+        )
+
+        self.d1 = nn.Linear(512, feature_dim)
+        self.ln = nn.LayerNorm(feature_dim)
+
+        self.to(device)
+
+    def reparameterize(self):
+        """This seems to not be used. In the paper, the authors mention a deterministic VAE. This is probably why"""
+        pass
+
+    def forward_conv(self):
+        """Authors define this operation but it isn't used anywhere, really..."""
+        pass
+
+
+    def forward(self, x, detach=False):
+
+        for conv in self.convs:
+            x = F.relu(conv(x))
+
+        x = x.view(x.size(0), -1)
+
+        if detach:
+            x = x.detach()
+
+        x = self.ln(self.d1(x))
+
+        return torch.tanh(x)
+
+
+    def copy_conv_weights_from(self, source):
+        """Authors use this to tie weights between Actor and Critic encoders. (?)"""
+        for i in range(3):
+            tie_weights(src=source.convs[i], tgt=self.convs[i])
+
+
+    def log(self):
+        """Should each model have their own logger? Probably not..."""
+        pass
+
+# SACAEEncoder(12, 64, 32)(torch.rand(1, 12, 224, 224))

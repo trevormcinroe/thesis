@@ -20,6 +20,9 @@ down_32:
         6.30836964,  2.98688722])
 
 """
+import sys
+sys.path.append('../')
+
 import time
 import argparse
 import torch
@@ -32,8 +35,12 @@ import numpy as np
 from collections import namedtuple
 from environments.kuka import KukaEnv
 from models import PolicyFC
-from utils import DotDict
+# from utils import DotDict
 from models.encoders import VAE, NatureCNN
+from utils import FrameStackEnv
+from collections import Counter
+from tensorboardX import SummaryWriter
+
 
 parser = argparse.ArgumentParser(description='Training simulation for various deep RL environments.')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
@@ -44,9 +51,12 @@ parser.add_argument('--render', action='store_true', default=False, help='render
 parser.add_argument('--log-interval', type=int, default=10, metavar='N', help='how often to print progress')
 parser.add_argument('--episodes', type=int, default=10000, help='number of training episodes to run')
 parser.add_argument('--images', action='store_true', default=False, help='Image-based states')
-parser.add_argument('--name', help='experiment name')
+# parser.add_argument('--name', help='experiment name')
 parser.add_argument('--z-dims', type=int, help='the dimensions of z')
 parser.add_argument('--encoder-type', type=str, default='vae', help='type of encoder to use')
+parser.add_argument('--n-steps', type=int, default=100000, help='number of steps for training')
+parser.add_argument('--name', help='run name (within the experiment)')
+parser.add_argument('--experiment-name', help='experiment name')
 args = parser.parse_args()
 
 env = KukaEnv(
@@ -55,7 +65,7 @@ env = KukaEnv(
 	max_steps=args.max_ep_len,
 	action_repeat=args.repeat,
 	images=args.images,
-	static_all=False,
+	static_all=True,
 	static_obj_rnd_pos=True,
 	rnd_obj_rnd_pos=False,
 	full_color=True
@@ -63,6 +73,11 @@ env = KukaEnv(
 
 env.seed(args.seed)
 torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+
+env = FrameStackEnv(env, 3, 'tensors', 'states')
+
+writer = SummaryWriter(log_dir=f'./{args.experiment_name}/logs/{args.name}')
 
 saved_action = namedtuple('saved_action', ['log_prob', 'value'])
 
@@ -72,16 +87,18 @@ model = PolicyFC(args.z_dims)
 if args.encoder_type == 'vae':
 	encoder = VAE(args.z_dims)
 	encoder.load_state_dict(torch.load('./models/vae_static_rnd_down_32.pth'))
-elif args.encoder_type == 'stdim':
-	encoder_features = DotDict({
-		'feature_size': args.z_dims,
-		'no_downsample': True,
-		'method': 'infonce-stdim',
-		'end_with_relu': False,
-		'linear': True
-	})
-	encoder = NatureCNN(3, encoder_features)
-	encoder.load_state_dict(torch.load('./models/stdim_static_rnd_32.pth'))
+# elif args.encoder_type == 'stdim':
+# 	encoder_features = DotDict({
+# 		'feature_size': args.z_dims,
+# 		'no_downsample': True,
+# 		'method': 'infonce-stdim',
+# 		'end_with_relu': False,
+# 		'linear': True
+# 	})
+# 	encoder = NatureCNN(3, encoder_features)
+# 	encoder.load_state_dict(torch.load('./models/stdim_static_rnd_32.pth'))
+else:
+	encoder = None
 
 
 optimizer = optim.Adam(model.parameters())
@@ -129,7 +146,8 @@ def select_action(state):
 	# 	state_value = state_value[0]
 
 	# else:
-	state = torch.from_numpy(state).float()
+
+	# state = torch.from_numpy(state).float()
 	probs, state_value = model(state)
 
 	# create a categorical distribution over the list of probabilities of actions
@@ -161,7 +179,7 @@ def finish_episode():
 		returns.insert(0, R)
 
 	returns = torch.tensor(returns, dtype=torch.float32)
-	returns = (returns - returns.mean()) / (returns.std() + eps)
+	# returns = (returns - returns.mean()) / (returns.std() + eps)
 
 
 	for (log_prob, value), R in zip(saved_actions, returns):
@@ -194,102 +212,86 @@ def main():
 	running_reward = 10
 
 	completed = []
+	reward_hist = []
+	global_steps = 0
+	episode = 0
 
 	# run inifinitely many episodes
 	# for i_episode in count(1):
-	for i in range(args.episodes):
+	# for i in range(args.episodes):
+	while global_steps < args.n_steps:
 
 		# reset environment and episode reward
-		state = env.reset()
+		s = env.reset()
 
-		# Encoding the state
-		state = encoder.encode_state(
-			torch.tensor(np.moveaxis(state, -1, 0), dtype=torch.float).unsqueeze(0)
-		).detach().numpy()[0]
+		done = False
+		step = 0
+		inner_completed = []
+		inner_r = []
 
-		# norming
-		# state = (state - z_min) / z_denom
+		while not done:
 
-		ep_reward = 0
-		inner_picked_up = []
-		# for each episode, only run some steps so that we don't
-		# infinite loop while learning
-		for t in range(1, args.max_ep_len):
-			action = select_action(state)
-			state, reward, picked_up, done, _ = env.step(action)
-
-
-			# encoding the state
-			state = encoder.encode_state(
-				torch.tensor(np.moveaxis(state, -1, 0), dtype=torch.float).unsqueeze(0)
-			).detach().numpy()[0]
+			# Encoding the state
+			if encoder is not None:
+				s = encoder.encode_state(
+					torch.tensor(np.moveaxis(s, -1, 0), dtype=torch.float).unsqueeze(0)
+				).detach().numpy()[0]
 
 			# norming
 			# state = (state - z_min) / z_denom
 
-			model.rewards.append(reward)
-			ep_reward += reward
-			inner_picked_up.append(picked_up)
+			# ep_reward = 0
+			# inner_picked_up = []
+			# for each episode, only run some steps so that we don't
+			# infinite loop while learning
+			a = select_action(s.float())
+			s_, r, picked_up, t, _ = env.step(a)
 
-			if done:
-				break
+			inner_completed.append(picked_up)
+			inner_r.append(r)
 
-		# update cumulative reward
-		running_reward = 0.05 * ep_reward + (1 - 0.05) * running_reward
+			model.rewards.append(r)
 
-		# perform backprop
+			if t:
+				done = True
+
+			s = s_
+
+			step += 1
+			global_steps += 1
+
 		finish_episode()
 
-		# Logging the picked up
-		if np.sum(inner_picked_up) > 0:
+		if np.sum(inner_completed) > 0:
 			completed.append(1)
 		else:
 			completed.append(0)
 
-		# log results
-		if i % args.log_interval == 0:
-			print(f'Episode {i}, Pct: {np.mean(completed[-100:])}, Hours time {(time.time() - start) / 3600}')
-			# print('Episode {}\tLast reward: {:.2f}\tAverage reward: {:.2f}\tPct: {:.4f}\'.format(
-			#       i, ep_reward, running_reward, np.mean(completed[-100:])))
+		reward_hist.append(np.sum(inner_r))
 
-		if (i + 1) % 2500 == 0:
-			filename_net = 'results/exp_model_' + str(args.name) + f'_{i}.pth'
-			torch.save(model.state_dict(), filename_net)
+		episode += 1
 
-		# check if we have "solved" the problem
-		# if running_reward > args.aver: #env.spec.reward_threshold:
-	print("Run has completed!")
-	checkpoint = {
-		'episode': i,
-		'state_dict': model.state_dict(),
-		'ep_reward': ep_reward,
-		'running_reward': running_reward
-	}
-	# filename_net = 'model_aver_' + str(args.aver) + '.pth'
-	filename_net = 'results/model_' + str(args.name) + '.pth'
-	torch.save(model.state_dict(), filename_net)
+		if episode % 10 == 0:
+			print(f'Episode {episode}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])}, Hours time {(time.time() - start) / 3600}')
+			writer.add_scalar('Completed', np.mean(completed[-100:]), episode)
+			# writer.add_scalar('Alpha', agent.alpha, episode)
+			# writer.add_scalar('Actor_Losses', np.mean(actor_losses[-100:]), episode)
+			# writer.add_scalar('Critic_Losses', np.mean(critic_losses[-100:]), episode)
+			# writer.add_scalar('Qs', np.mean(qs[-100:]), episode)
 
-	# Plotting
-	with open(f'./results/results_{args.name}.data', 'wb') as file:
-		pickle.dump(completed, file)
+			# if episode % 1000 == 0:
+			# 	print('----------ACTION COUNTER-----------------')
+			# 	print(Counter(replay_memory.a.numpy()))
+			# 	s, a, r, s_, t = replay_memory.sample(100)
+			# 	print(r)
+			# 	print(t)
+			# 	print('-----------------------------------------')
 
-	smoothed = []
-	b_idx = 0
-	e_idx = 100
-	while e_idx < len(completed):
-		smoothed.append(np.mean(completed[b_idx:e_idx]))
-		b_idx += 1
-		e_idx += 1
-	fig = plt.figure(dpi=400)
-	plt.plot(smoothed)
-	plt.title('Success Rate in Kuka Environment (Pick Up)')
-	plt.xlabel('Episode')
-	plt.ylabel('Success Rate')
-	plt.ylim(0., 1.)
-	plt.savefig(f'./results/results_{args.name}.png')
-
-	print(f'Experiment {args.name} completed. \n Total time (hrs): {(time.time() - start) / 3600}')
+	return completed
 
 
 if __name__ == '__main__':
-	main()
+	completed = main()
+
+	with open(f'./{args.experiment_name}/{args.name}.data', 'wb') as f:
+		pickle.dump(completed, f)

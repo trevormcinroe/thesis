@@ -250,6 +250,8 @@ class KukaEnv(gym.Env):
 		self.rnd_obj_rnd_pos = rnd_obj_rnd_pos
 		self.full_color = full_color
 
+		self.action_space = 7
+
 		self.rnd_obj = None
 
 		self.metadata = {'render.modes': ['human', 'rgb_array'], 'video.frames_per_second': 50}
@@ -691,7 +693,7 @@ class KukaEnv(gym.Env):
 		# 3rd item from block_pos vector is the block's Z-coordinate
 		if block_pos[2] > 0.2:
 			picked_up = 1
-			reward = reward + 10000
+			reward = reward + 10000  # 10000
 			print("Successfully grasped a block!")
 
 		return reward, picked_up

@@ -127,6 +127,10 @@ for _ in tqdm(range(N_EXPLORE)):
 				t = 0
 				done = True
 
+		if picked_up:
+			t = 1
+			done = True
+
 		replay_memory.store(s, a, r, s_, t)
 
 		s = s_
@@ -165,6 +169,10 @@ while global_steps < args.n_steps:
 				t = 0
 				done = True
 
+		if picked_up:
+			t = 1
+			done = True
+
 		replay_memory.store(s, a, r, s_, t)
 
 		s = s_
@@ -174,11 +182,9 @@ while global_steps < args.n_steps:
 
 	if np.sum(inner_completed) > 0:
 		completed.append(1)
-		# failures = 0
 
 	else:
 		completed.append(0)
-		# failures += 1
 
 	reward_hist.append(np.sum(inner_r))
 
@@ -189,18 +195,8 @@ while global_steps < args.n_steps:
 	qs.append(np.mean(agent.qs))
 	agent.clear_losses()
 
-
-	# if np.all([
-	# 	episode > 4000, np.mean(completed[-100:]) < 0.4
-	# ]):
-	# 	inspect_episode(agent, env, 'cuda:0', args.experiment_name, episode)
-	# 	# draw batch
-	# 	s, a, r, s_, t, = replay_memory.sample(256)
-	#
-	# 	pass
-
 	if episode % 10 == 0:
-		print(f'Episode {episode}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])}, Hours time {(time.time() - start) / 3600}, a: {round(agent.alpha.item(), 4)}/{round(agent.log_alpha.item(), 4)}')
+		print(f'Episode {episode}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])}, Hours time {(time.time() - start) / 3600}, a: {round(agent.alpha.item(), 4)}/{round(agent.log_alpha.item(), 4)}, Step: {global_steps}')
 		writer.add_scalar('Completed', np.mean(completed[-100:]), episode)
 		writer.add_scalar('Alpha', agent.alpha, episode)
 		writer.add_scalar('Actor_Losses', np.mean(actor_losses[-100:]), episode)

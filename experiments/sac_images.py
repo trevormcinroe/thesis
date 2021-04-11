@@ -40,9 +40,9 @@ env = KukaEnv(
     is_discrete=True,
     max_steps=args.max_ep_len,
     action_repeat=args.repeat,
-    images=args.images,
-    static_all=True,
-    static_obj_rnd_pos=False,
+    images=True,
+    static_all=False,
+    static_obj_rnd_pos=True,
     rnd_obj_rnd_pos=False,
     full_color=False,
 	width=84,
@@ -53,6 +53,7 @@ env = KukaEnv(
 
 env.seed(args.seed)
 torch.manual_seed(args.seed)
+np.random.seed(args.seed)
 
 env = FrameStackEnv(env, 3, 'tensors')
 
@@ -69,12 +70,12 @@ agent = SACAgentImages(
 	alpha_beta=0.9,
 	batch_size=256,
 	critic_target_update_freq=4,
-	actor_update_freq=2,  # critic should have a higher learning frequency than the actor
+	actor_update_freq=8,  # critic should have a higher learning frequency than the actor
 	critic_update_freq=1,
 	critic_tau=0.005,
 	is_discrete=True,
 	device='cuda:0',
-	clip_grad=1.0
+	clip_grad=5.0
 )
 
 replay_memory = ReplayMemory(mem_size=200000, s_shape=[3, 84, 84], norm=False)
@@ -104,6 +105,10 @@ for _ in tqdm(range(N_EXPLORE)):
 				t = 0
 				done = True
 
+		if picked_up:
+			t = 1
+			done = True
+
 		replay_memory.store(s, a, r, s_, t)
 
 		s = s_
@@ -111,7 +116,9 @@ for _ in tqdm(range(N_EXPLORE)):
 completed = []
 reward_hist = []
 start = time.time()
-
+actor_losses = []
+critic_losses = []
+qs = []
 global_steps = 0
 episode = 0
 
@@ -119,7 +126,6 @@ while global_steps < args.n_steps:
 	inner_completed = []
 	inner_r = []
 	s = env.reset()
-
 	done = False
 	step = 0
 
@@ -129,7 +135,7 @@ while global_steps < args.n_steps:
 		inner_completed.append(picked_up)
 		inner_r.append(r)
 
-		agent.update(replay_memory, step)
+		agent.update(replay_memory, step, True)
 
 		if t:
 			if picked_up:
@@ -138,6 +144,10 @@ while global_steps < args.n_steps:
 			else:
 				t = 0
 				done = True
+
+		if picked_up:
+			t = 1
+			done = True
 
 		replay_memory.store(s, a, r, s_, t)
 
@@ -155,10 +165,18 @@ while global_steps < args.n_steps:
 
 	episode += 1
 
+	actor_losses.append(np.mean(agent.actor_losses))
+	critic_losses.append(np.mean(agent.critic_losses))
+	qs.append(np.mean(agent.qs))
+	agent.clear_losses()
+
 	if episode % 10 == 0:
 		print(f'Episode {episode}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])}, Hours time {(time.time() - start) / 3600}, a: {round(agent.alpha.item(), 4)}/{round(agent.log_alpha.item(), 4)}')
 		writer.add_scalar('Completed', np.mean(completed[-100:]), episode)
 		writer.add_scalar('Alpha', agent.alpha, episode)
+		writer.add_scalar('Actor_Losses', np.mean(actor_losses[-100:]), episode)
+		writer.add_scalar('Critic_Losses', np.mean(critic_losses[-100:]), episode)
+		writer.add_scalar('Qs', np.mean(qs[-100:]), episode)
 
 	if episode % 1000 == 0:
 		print('----------ACTION COUNTER-----------------')

@@ -26,8 +26,8 @@ class ReplayMemory:
 		self.mem_cntr = 0
 
 		self.norm = norm
-		self.min = None
-		self.max = None
+		self.mean = None
+		self.std = None
 
 	def store(self, s, a, r, s_, t):
 		idx = self.mem_cntr % self.mem_size
@@ -46,9 +46,10 @@ class ReplayMemory:
 		idxs = np.random.choice(max_size, size=batch_size, replace=False)
 
 		if self.norm:
-			self.min = torch.min(self.r[:max_size])
-			self.max = torch.max(self.r[:max_size])
-			r = (self.r[idxs] - self.min) / (self.max - self.min)
+			self.mean = torch.mean(self.r[:max_size])
+			self.std = torch.std(self.r[:max_size])
+			r = self.r[idxs]
+			r = (r - self.mean) / (self.std + 1e-8)
 			return self.s[idxs], self.a[idxs], r, self.s_[idxs], self.t[idxs]
 
 		else:

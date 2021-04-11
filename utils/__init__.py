@@ -8,6 +8,44 @@ from torch import nn
 import torch.nn.functional as F
 from collections import deque
 from torchvision.transforms import ToTensor
+from torch.distributions import Categorical
+
+
+def inspect_episode(agent, env, device, experiment_name, step):
+
+    info = {
+        's': [],
+        'a': [],
+        'r': [],
+        's_': [],
+        't': [],
+        'aprobs': []
+    }
+    s = env.reset()
+
+    done = False
+
+    while not done:
+        a, aprobs = agent.sample_action(s.unsqueeze(0).float().to(device), inspect=True)
+
+        s_, r, picked_up, t, _ = env.step(a)
+
+        if t:
+            done = True
+
+        info['s'].append(s)
+        info['a'].append(a)
+        info['r'].append(r)
+        info['s_'].append(s_)
+        info['t'].append(t)
+        info['aprobs'].append(aprobs)
+
+        s = s_
+
+    with open(f'./{experiment_name}-{step}.data', 'wb') as f:
+        pickle.dump(info, f)
+
+
 
 
 def make_pca_plot(model, states, scaled_rewards, title, save_name):
@@ -54,19 +92,25 @@ def make_pca_plot(model, states, scaled_rewards, title, save_name):
     plt.savefig(save_name)
 
 
+# def weight_init(m):
+#     """Custom weight init for Conv2D and Linear layers."""
+#     if isinstance(m, nn.Linear):
+#         nn.init.orthogonal_(m.weight.data)
+#         m.bias.data.fill_(0.0)
+#     elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+#         # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
+#         assert m.weight.size(2) == m.weight.size(3)
+#         m.weight.data.fill_(0.0)
+#         m.bias.data.fill_(0.0)
+#         mid = m.weight.size(2) // 2
+#         gain = nn.init.calculate_gain('relu')
+#         nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
+
 def weight_init(m):
-    """Custom weight init for Conv2D and Linear layers."""
-    if isinstance(m, nn.Linear):
-        nn.init.orthogonal_(m.weight.data)
-        m.bias.data.fill_(0.0)
-    elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-        # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
-        assert m.weight.size(2) == m.weight.size(3)
-        m.weight.data.fill_(0.0)
-        m.bias.data.fill_(0.0)
-        mid = m.weight.size(2) // 2
-        gain = nn.init.calculate_gain('relu')
-        nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
+    pass
+    # if isinstance(m, nn.Linear):
+    #     torch.nn.init.xavier_uniform_(m.weight, gain=1)
+    #     torch.nn.init.constant_(m.bias, 0)
 
 
 def gaussian_logprob(noise, log_std):
@@ -95,11 +139,12 @@ def soft_update_params(net, target_net, tau):
 
 
 class FrameStackEnv:
-    def __init__(self, env, k, data_type='np'):
+    def __init__(self, env, k, data_type='np', state_type='images'):
         self.frames = None
         self.env = env
         self.k = k
         self.data_type = data_type
+        self.state_type = state_type
 
         self.reset()
 
@@ -108,19 +153,27 @@ class FrameStackEnv:
         return self.env.images
 
     def reset(self):
-        if self.data_type == 'np':
-            self.frames = deque([self.env.reset() for _ in range(self.k)], maxlen=self.k)
-        else:
-            self.frames = deque([ToTensor()(self.env.reset()) for _ in range(self.k)])
+        if self.state_type == 'images':
+            if self.data_type == 'np':
+                self.frames = deque([self.env.reset() for _ in range(self.k)], maxlen=self.k)
+            else:
+                self.frames = deque([ToTensor()(self.env.reset()) for _ in range(self.k)], maxlen=self.k)
 
-        # state = self.env.reset()
-        # self.frames.append(state)
+        else:
+            if self.data_type == 'np':
+                self.frames = deque([self.env.reset() for _ in range(self.k)], maxlen=self.k)
+            else:
+                self.frames = deque([torch.tensor(self.env.reset()) for _ in range(self.k)], maxlen=self.k)
 
         return self._get_obs()
 
     def step(self, action):
         state, reward, picked_up, done, _ = self.env.step(action)
-        self.frames.append(state)
+
+        if self.state_type == 'images':
+            self.frames.append(ToTensor()(state))
+        else:
+            self.frames.append(torch.tensor(state))
 
         return self._get_obs(), reward, picked_up, done, _
 
@@ -129,3 +182,75 @@ class FrameStackEnv:
             return np.concatenate(list(self.frames), axis=2)
         else:
             return torch.cat(list(self.frames), axis=0)
+
+
+class ExperienceGenerator:
+    def __init__(self, env):
+        self.env = env
+
+    def play_n_episodes(self, episodes_per_learning_round, actor):
+        """
+
+        Args:
+            episodes_per_learning_round:
+            actor:
+
+        Returns:
+            c_states, c_actions, c_rewards List[Lists] -- c_completed List[ints] -- global_steps int
+        """
+        collected_states = []
+        collected_actions = []
+        collected_rewards = []
+        collected_completed = []
+        global_steps = 0
+
+        for _ in range(episodes_per_learning_round):
+            states, actions, rewards, completed, steps = self.play_1_episode(actor)
+            collected_states.append(states)
+            collected_actions.append(actions)
+            collected_rewards.append(rewards)
+            if np.sum(completed) > 0:
+                collected_completed.append(1)
+            else:
+                collected_completed.append(0)
+            global_steps += steps
+
+        return collected_states, collected_actions, collected_rewards, collected_completed, global_steps
+
+    def play_1_episode(self, actor):
+        s = self.env.reset()
+
+        states = []
+        actions = []
+        rewards = []
+        completed = []
+
+        steps = 0
+
+        done = False
+
+        while not done:
+            actor_output = actor(s.float())
+            action_dist = Categorical(actor_output)
+            a = action_dist.sample()
+            s_, r, picked_up, t, _ = self.env.step(a.item())
+
+            states.append(s)
+            actions.append(a.item())
+            rewards.append(r)
+            completed.append(picked_up)
+
+            s = s_
+
+            steps += 1
+
+            if t:
+                done = True
+            if picked_up:
+                done = True
+
+        return states, actions, rewards, completed, steps
+
+
+
+

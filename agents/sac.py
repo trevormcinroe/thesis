@@ -279,7 +279,6 @@ class SACAgentStates:
 
 		self.actor_optimizer.step()
 
-
 		self.log_alpha_optimizer.zero_grad()
 		alpha_loss.backward()
 
@@ -504,6 +503,11 @@ class SACAgentImages:
 			[self.log_alpha], lr=alpha_lr, betas=(alpha_beta, 0.999)
 		)
 
+		# for reporting
+		self.actor_losses = []
+		self.critic_losses = []
+		self.qs = []
+
 	@property
 	def alpha(self):
 		return self.log_alpha.exp()
@@ -526,13 +530,13 @@ class SACAgentImages:
 		Returns:
 			sampled actions, log probs
 		"""
-		with torch.no_grad():
-			action_probs = self.actor(s)
-			action_dist = Categorical(action_probs)
-			action = action_dist.sample()
-			return action.cpu().item()
+		# with torch.no_grad():
+		action_probs = self.actor(s)
+		action_dist = Categorical(action_probs)
+		action = action_dist.sample()
+		return action.cpu().item()
 
-	def update(self, replay_buffer, step):
+	def update(self, replay_buffer, step, report=False):
 
 		s, a, r, s_, t = replay_buffer.sample(self.batch_size)
 
@@ -543,18 +547,19 @@ class SACAgentImages:
 							   a.to(self.device).unsqueeze(1),
 							   r.to(self.device).unsqueeze(1),
 							   s_.to(self.device),
-							   t.to(self.device).unsqueeze(1))
+							   t.to(self.device).unsqueeze(1),
+							   report)
 
 		# (2) Policy (3) Entropy
 		if step % self.actor_update_freq == 0:
-			self.update_actor_and_alpha(s.to(self.device))
+			self.update_actor_and_alpha(s.to(self.device), report)
 
 		# Soft update
 		if step % self.critic_target_update_freq == 0:
 			soft_update_params(self.critic.Q1, self.critic_target.Q1, self.critic_tau)
 			soft_update_params(self.critic.Q2, self.critic_target.Q2, self.critic_tau)
 
-	def update_critic(self, s, a, r, s_, t):
+	def update_critic(self, s, a, r, s_, t, report):
 		with torch.no_grad():
 			action_probs = self.actor(s_)
 			action_dist = Categorical(action_probs)
@@ -576,6 +581,9 @@ class SACAgentImages:
 			target_V = target_V.sum(dim=1).unsqueeze(-1)
 			target_Q = r + (t * self.gamma * target_V)
 
+			if report:
+				self.qs.append(torch.min(target_Q1, target_Q2).mean().item())
+
 		current_Q1, current_Q2 = self.critic(s)
 		current_Q1 = current_Q1.gather(1, a.long())
 		current_Q2 = current_Q2.gather(1, a.long())
@@ -591,7 +599,10 @@ class SACAgentImages:
 
 		self.critic_optimizer.step()
 
-	def update_actor_and_alpha(self, s):
+		if report:
+			self.critic_losses.append(critic_loss.item())
+
+	def update_actor_and_alpha(self, s, report):
 		"""NOTE: torch.no_grad() is unnecessary as the loss never gets propagated"""
 		action_probs = self.actor(s)
 		action_dist = Categorical(action_probs)
@@ -608,8 +619,12 @@ class SACAgentImages:
 
 		# TODO: detach?
 
-		inside_term = (self.alpha.detach() * log_prob - Q)
+		inside_term = (self.alpha * log_prob - Q)
 		actor_loss = (action_probs * inside_term).sum(dim=1).mean()
+
+		log_prob = torch.sum(log_prob * action_probs, dim=1)
+		alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
+
 
 		self.actor_optimizer.zero_grad()
 		actor_loss.backward()
@@ -619,14 +634,26 @@ class SACAgentImages:
 
 		self.actor_optimizer.step()
 
+		self.log_alpha_optimizer.zero_grad()
+		alpha_loss.backward()
+		self.log_alpha_optimizer.step()
+
+		if report:
+			self.actor_losses.append(actor_loss.item())
+
 		# alpha_loss = (self.alpha * (-log_prob - self.target_entropy).detach()).mean()
 
 		# The official implementation uses log_alpha here....
 		# But uses log_alpha.exp() everywhere else
-		alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
-		self.log_alpha_optimizer.zero_grad()
-		alpha_loss.backward()
-		self.log_alpha_optimizer.step()
+		# alpha_loss = -(self.log_alpha * (log_prob + self.target_entropy).detach()).mean()
+		# self.log_alpha_optimizer.zero_grad()
+		# alpha_loss.backward()
+		# self.log_alpha_optimizer.step()
+
+	def clear_losses(self):
+		self.actor_losses = []
+		self.critic_losses = []
+		self.qs = []
 
 	def save(self, model_dir, step):
 		torch.save(

@@ -39,6 +39,7 @@ from models import PolicyFC
 from models.encoders import VAE, NatureCNN
 from utils import FrameStackEnv
 from collections import Counter
+from torch.nn.utils import clip_grad_norm_
 from tensorboardX import SummaryWriter
 
 
@@ -53,7 +54,7 @@ parser.add_argument('--episodes', type=int, default=10000, help='number of train
 parser.add_argument('--images', action='store_true', default=False, help='Image-based states')
 # parser.add_argument('--name', help='experiment name')
 parser.add_argument('--z-dims', type=int, help='the dimensions of z')
-parser.add_argument('--encoder-type', type=str, default='vae', help='type of encoder to use')
+parser.add_argument('--encoder-type', type=str, default='none', help='type of encoder to use')
 parser.add_argument('--n-steps', type=int, default=100000, help='number of steps for training')
 parser.add_argument('--name', help='run name (within the experiment)')
 parser.add_argument('--experiment-name', help='experiment name')
@@ -82,6 +83,7 @@ writer = SummaryWriter(log_dir=f'./{args.experiment_name}/logs/{args.name}')
 saved_action = namedtuple('saved_action', ['log_prob', 'value'])
 
 model = PolicyFC(args.z_dims)
+clip_grad = 20.0
 
 # Encoder
 if args.encoder_type == 'vae':
@@ -101,7 +103,7 @@ else:
 	encoder = None
 
 
-optimizer = optim.Adam(model.parameters())
+optimizer = optim.Adam(model.parameters(), lr=3e-4)
 eps = np.finfo(np.float32).eps.item()
 
 # FOR NORM'ING THE LATENT CODES
@@ -162,7 +164,7 @@ def select_action(state):
 	return action.item()
 
 
-def finish_episode():
+def finish_episode(report=False):
 	"""
 	Training code. Calcultes actor and critic loss and performs backprop.
 	"""
@@ -178,9 +180,14 @@ def finish_episode():
 		R = r + args.gamma * R
 		returns.insert(0, R)
 
+	# if np.max(model.rewards) > 10:
+	# 	print(f'Before norm: {model.rewards[::-1]}')
+
 	returns = torch.tensor(returns, dtype=torch.float32)
 	# returns = (returns - returns.mean()) / (returns.std() + eps)
 
+	# if np.max(model.rewards) > 10:
+	# 	print(f'After norm: {returns}')
 
 	for (log_prob, value), R in zip(saved_actions, returns):
 		advantage = R - value.item()
@@ -199,11 +206,17 @@ def finish_episode():
 
 	# perform backprop
 	loss.backward()
+
+	# clip_grad_norm_(model.parameters(), clip_grad)
+
 	optimizer.step()
 
 	# reset rewards and action buffer
 	del model.rewards[:]
 	del model.saved_actions[:]
+
+	if report:
+		return torch.stack(policy_losses).sum(), torch.stack(value_losses).sum()
 
 
 def main():
@@ -215,6 +228,8 @@ def main():
 	reward_hist = []
 	global_steps = 0
 	episode = 0
+	pi_loss = []
+	v_loss = []
 
 	# run inifinitely many episodes
 	# for i_episode in count(1):
@@ -252,7 +267,10 @@ def main():
 
 			model.rewards.append(r)
 
+			# two exit conditions: (1) if time-limit is reached (2) if object is picked up
 			if t:
+				done = True
+			if picked_up:
 				done = True
 
 			s = s_
@@ -260,7 +278,10 @@ def main():
 			step += 1
 			global_steps += 1
 
-		finish_episode()
+		pl, vl = finish_episode(True)
+
+		pi_loss.append(pl.item())
+		v_loss.append(vl.item())
 
 		if np.sum(inner_completed) > 0:
 			completed.append(1)
@@ -275,8 +296,8 @@ def main():
 			print(f'Episode {episode}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])}, Hours time {(time.time() - start) / 3600}')
 			writer.add_scalar('Completed', np.mean(completed[-100:]), episode)
 			# writer.add_scalar('Alpha', agent.alpha, episode)
-			# writer.add_scalar('Actor_Losses', np.mean(actor_losses[-100:]), episode)
-			# writer.add_scalar('Critic_Losses', np.mean(critic_losses[-100:]), episode)
+			writer.add_scalar('Actor_Losses', np.mean(pi_loss[-100:]), episode)
+			writer.add_scalar('Critic_Losses', np.mean(v_loss[-100:]), episode)
 			# writer.add_scalar('Qs', np.mean(qs[-100:]), episode)
 
 			# if episode % 1000 == 0:

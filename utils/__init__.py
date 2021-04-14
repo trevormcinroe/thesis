@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from collections import deque
 from torchvision.transforms import ToTensor
 from torch.distributions import Categorical
-
+import gym
 
 def inspect_episode(agent, env, device, experiment_name, step):
 
@@ -252,5 +252,43 @@ class ExperienceGenerator:
         return states, actions, rewards, completed, steps
 
 
+def preprocess_obs(obs, bits=5):
+    """Preprocessing image, see https://arxiv.org/abs/1807.03039."""
+    bins = 2**bits
+    assert obs.dtype == torch.float32
+    if bits < 8:
+        obs = torch.floor(obs / 2**(8 - bits))
+    obs = obs / bins
+    obs = obs + torch.rand_like(obs) / bins
+    obs = obs - 0.5
+    return obs
 
 
+class FrameStack(gym.Wrapper):
+    def __init__(self, env, k):
+        gym.Wrapper.__init__(self, env)
+        self._k = k
+        self._frames = deque([], maxlen=k)
+        shp = env.observation_space.shape
+        self.observation_space = gym.spaces.Box(
+            low=0,
+            high=1,
+            shape=((shp[0] * k,) + shp[1:]),
+            dtype=env.observation_space.dtype
+        )
+        self._max_episode_steps = env._max_episode_steps
+
+    def reset(self):
+        obs = self.env.reset()
+        for _ in range(self._k):
+            self._frames.append(obs)
+        return self._get_obs()
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self._frames.append(obs)
+        return self._get_obs(), reward, done, info
+
+    def _get_obs(self):
+        assert len(self._frames) == self._k
+        return np.concatenate(list(self._frames), axis=0)

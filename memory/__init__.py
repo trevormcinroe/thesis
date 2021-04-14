@@ -7,18 +7,18 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
 class ReplayMemory:
 
-	def __init__(self, mem_size, s_shape, norm=False):
+	def __init__(self, mem_size, s_shape, a_shape=0, norm=False):
 		self.mem_size = mem_size
 		if np.any([isinstance(s_shape, list), isinstance(s_shape, tuple)]):
 			self.s = torch.zeros((mem_size, *s_shape))
-			self.a = torch.zeros(mem_size)
+			self.a = torch.zeros((mem_size, a_shape))
 			self.r = torch.zeros(mem_size)
 			self.s_ = torch.zeros((mem_size, *s_shape))
 			self.t = torch.zeros(mem_size)
 
 		else:
 			self.s = torch.zeros((mem_size, s_shape))
-			self.a = torch.zeros(mem_size)
+			self.a = torch.zeros((mem_size, a_shape))
 			self.r = torch.zeros(mem_size)
 			self.s_ = torch.zeros((mem_size, s_shape))
 			self.t = torch.zeros(mem_size)

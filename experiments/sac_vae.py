@@ -2,9 +2,9 @@ import sys
 sys.path.append('../')
 
 from environments.kuka import KukaEnv
-from agents.sac import SACAgentImages
+from agents.sac import SACAgentStates
 from memory import ReplayMemory
-from utils import FrameStackEnv
+from utils import FrameStackEnv, inspect_episode
 import time
 import argparse
 import torch
@@ -13,8 +13,8 @@ import numpy as np
 from torchvision.transforms import ToTensor
 from tqdm import tqdm
 from collections import Counter
-import gym
 from tensorboardX import SummaryWriter
+from models.encoders import VAE, train_vae
 
 # TODO: modify the DONE flag for off-policy algorithms. If the DONE flag comes in due to a time-limit, there are
 # known convergence issues with off-policy algos!
@@ -31,8 +31,10 @@ parser.add_argument('--log-interval', type=int, default=10, metavar='N', help='h
 parser.add_argument('--episodes', type=int, default=10000, help='number of training episodes to run')
 parser.add_argument('--images', action='store_true', default=True, help='Image-based states')
 parser.add_argument('--n-steps', type=int, default=100000, help='number of steps for training')
-parser.add_argument('--name', help='experiment name')
+parser.add_argument('--name', help='run name (within the experiment)')
 parser.add_argument('--experiment-name', help='experiment name')
+parser.add_argument('--z-dims', type=int, default=32)
+parser.add_argument('--encoder-train-freq', default=100)
 args = parser.parse_args()
 
 env = KukaEnv(
@@ -44,25 +46,25 @@ env = KukaEnv(
     static_all=False,
     static_obj_rnd_pos=True,
     rnd_obj_rnd_pos=False,
-    full_color=True,
+    full_color=False,
 	width=84,
 	height=84
 )
 
-# env = gym.make('BowlingDeterministic')
 
 env.seed(args.seed)
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
-env = FrameStackEnv(env, 9, 'tensors')
+env = FrameStackEnv(env, 3, 'tensors')
 
-agent = SACAgentImages(
-	state_cc=9,
-	num_filters=32,
-	num_convs=3,
+# TODO: should the actor's LR be lower??? People generally say actor < critic!
+agent = SACAgentStates(
+	state_shape=args.z_dims,
+	num_layers=2,
+	num_hidden=256,  # originally 256
 	action_shape=7,
-	actor_lr=1e-4,
+	actor_lr=1e-4,  # originally 3e-4 --> changing for upper-bound-actorlrlow
 	actor_beta=0.9,
 	critic_lr=3e-4,
 	critic_beta=0.9,
@@ -70,7 +72,7 @@ agent = SACAgentImages(
 	alpha_beta=0.9,
 	batch_size=256,
 	critic_target_update_freq=4,
-	actor_update_freq=8,  # critic should have a higher learning frequency than the actor
+	actor_update_freq=8,  # 10 baselines proprio is 8
 	critic_update_freq=1,
 	critic_tau=0.005,
 	is_discrete=True,
@@ -78,10 +80,12 @@ agent = SACAgentImages(
 	clip_grad=5.0
 )
 
-replay_memory = ReplayMemory(mem_size=100000, s_shape=[9, 84, 84], norm=False)
+replay_memory = ReplayMemory(mem_size=200000, s_shape=[3, 84, 84], norm=False)
+
+vae = VAE(z_dims=32, state_cc=3, num_filters=32, device='cuda:0')
+vae_optimizer = torch.optim.Adam(vae.parameters(), lr=3e-4)
 
 writer = SummaryWriter(log_dir=f'./{args.experiment_name}/logs/{args.name}')
-
 
 # exploration
 N_EXPLORE = 100
@@ -113,6 +117,10 @@ for _ in tqdm(range(N_EXPLORE)):
 
 		s = s_
 
+# Pre-training of the VAE
+print('Training VAE...')
+train_vae(vae, vae_optimizer, replay_memory, 5000, 256, args.seed, True)
+
 completed = []
 reward_hist = []
 start = time.time()
@@ -130,12 +138,13 @@ while global_steps < args.n_steps:
 	step = 0
 
 	while not done:
-		a = agent.sample_action(s.unsqueeze(0).float().to('cuda:0'))
+		s_encoded = vae.encode_state(s.unsqueeze(0).float().to('cuda'))
+		a = agent.sample_action(s_encoded)
 		s_, r, picked_up, t, _ = env.step(a)
 		inner_completed.append(picked_up)
 		inner_r.append(r)
 
-		agent.update(replay_memory, step, True)
+		agent.update(replay_memory, step, True, vae)
 
 		if t:
 			if picked_up:
@@ -165,6 +174,10 @@ while global_steps < args.n_steps:
 
 	episode += 1
 
+	# if np.mean(completed[-100:]) < np.mean(completed[-200:]):
+	# 	if episode % args.encoder_train_freq == 0:
+	# 		train_vae(vae, vae_optimizer, replay_memory, 10, 256)
+
 	actor_losses.append(np.mean(agent.actor_losses))
 	critic_losses.append(np.mean(agent.critic_losses))
 	qs.append(np.mean(agent.qs))
@@ -184,67 +197,9 @@ while global_steps < args.n_steps:
 		s, a, r, s_, t = replay_memory.sample(100)
 		print(r)
 		print(t)
+		print(vae.encode_state(s.to('cuda:0')))
 		print('-----------------------------------------')
 
 
 with open(f'./{args.experiment_name}/{args.name}.data', 'wb') as f:
 	pickle.dump(reward_hist, f)
-
-# completed = []
-# reward_hist = []
-#
-# start = time.time()
-#
-# for i in range(N_EPISODES):
-# 	inner_completed = []
-# 	inner_r = []
-# 	s = env.reset()
-#
-# 	done = False
-#
-# 	step = 0
-#
-# 	while not done:
-# 		a = agent.sample_action(s.unsqueeze(0).float().to('cuda:0'))
-# 		s_, r, picked_up, t, _ = env.step(a)
-# 		inner_completed.append(picked_up)
-# 		inner_r.append(r)
-#
-# 		agent.update(replay_memory, step)
-#
-# 		if t:
-# 			if picked_up:
-# 				# replay_memory.store(s, a, r, s_, 1)
-# 				t = 1
-# 				done = True
-# 			else:
-# 				# replay_memory.store(s, a, r, s_, 0)
-# 				t = 0
-# 				done = True
-#
-# 		replay_memory.store(s, a, r, s_, t)
-#
-# 		s = s_
-#
-# 		step += 1
-#
-# 	if np.sum(inner_completed) > 0:
-# 		completed.append(1)
-# 	else:
-# 		completed.append(0)
-#
-# 	reward_hist.append(np.sum(inner_r))
-#
-# 	if i % 10 == 0:
-# 		print(f'Episode {i}, Pct: {np.mean(completed[-100:])}, R: {np.mean([reward_hist[-100:]])} Hours time {(time.time() - start) / 3600}')
-#
-# 	if i % 1000 == 0:
-# 		print('----------ACTION COUNTER-----------------')
-# 		print(Counter(replay_memory.a.numpy()))
-# 		s, a, r, s_, t = replay_memory.sample(100)
-# 		print(r)
-# 		print(t)
-# 		print('-----------------------------------------')
-# tensor([ 2.4350e-05,  4.3162e-06, -1.8784e-05, -3.9227e-05,  7.6826e-05,
-#          1.0365e-06, -2.0581e-05], device='cuda:0', requires_grad=True)
-

@@ -1,84 +1,9 @@
 import torch
-from torch import nn
 import torch.nn.functional as F
-# from a2c_ppo_acktr.utils import init
-
-
-class VAE(nn.Module):
-    def __init__(self, z_dims):
-        super().__init__()
-        self.z_dims = z_dims
-
-        ## ENCODER ##
-        self.encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=7, stride=3, bias=False),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(),
-            nn.Conv2d(32, 64, kernel_size=5, stride=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.Conv2d(64, 128, kernel_size=5, stride=3, bias=False),
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(),
-        )
-        self.mu_fc = nn.Linear(6272, self.z_dims)
-        self.var_fc = nn.Linear(6272, self.z_dims)
-
-        ## DECODER ##
-        self.decoder_input = nn.Linear(self.z_dims, 6272)
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, kernel_size=5, stride=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=5, stride=3, bias=False),
-            nn.BatchNorm2d(32),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(32, 16, kernel_size=5, stride=3, bias=False),
-            nn.BatchNorm2d(16),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(16, 8, kernel_size=7, stride=1, bias=False),
-            nn.BatchNorm2d(8),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(8, 3, kernel_size=4, stride=1, bias=False),
-            nn.Sigmoid()
-        )
-
-    def encode(self, x):
-        x = self.encoder(x)
-        x = torch.flatten(x, start_dim=1)
-        mu = self.mu_fc(x)
-        var = self.var_fc(x)
-        return mu, var
-
-    def reparam(self, mu, var):
-        std = torch.exp(var / 2)
-        e = torch.randn_like(std)
-        return e * std + mu
-
-    def decode(self, z):
-        x = self.decoder_input(z)
-        x = x.view(-1, 128, 7, 7)
-        x = self.decoder(x)
-        return x
-
-    def encode_state(self, x):
-        mu, var = self.encode(x)
-        z = self.reparam(mu, var)
-        return z
-
-    def forward(self, x):
-        mu, var = self.encode(x)
-        z = self.reparam(mu, var)
-        x_hat = self.decode(z)
-        return x_hat, mu, var
-
-# test = VAE(64)
-#
-# n = torch.rand(size=(1, 1, 224, 224), dtype=torch.float)
-#
-# xhat, _, _ = test(n)
-# print(xhat.shape)
-
+from torch import nn
+import numpy as np
+from tqdm import tqdm
+from torchvision import transforms
 
 class Flatten(nn.Module):
     def forward(self, x):
@@ -181,14 +106,50 @@ def tie_weights(src, tgt):
     tgt.bias = src.bias
 
 
+class SACAEEncoderDiscrete(nn.Module):
+    def __init__(self, state_cc, feature_dim, num_filters, device='cpu'):
+        super().__init__()
+
+        self.convs = nn.ModuleList([
+            nn.Conv2d(state_cc, num_filters, (7, 7), 3),
+            nn.Conv2d(num_filters, num_filters, (5, 5), 2),
+            nn.Conv2d(num_filters, num_filters, (5, 5), 2),
+        ])
+
+        self.d = nn.Linear(512, feature_dim)
+        self.ln = nn.LayerNorm(feature_dim)
+
+        self.to(device)
+
+    def forward(self, s, detach=False):
+        for conv in self.convs:
+            s = F.relu(conv(s))
+
+        s = s.view(s.size(0), -1)
+
+        if detach:
+            s = s.detach()
+
+        s = self.ln(self.d(s))
+
+        return torch.tanh(s)
+
+    def copy_conv_weights_from(self, source):
+        """Authors use this to tie weights between Actor and Critic encoders. (?)"""
+        for i in range(3):
+            tie_weights(src=source.convs[i], tgt=self.convs[i])
+
+
+
+
+
 class SACAEEncoder(nn.Module):
     def __init__(self, state_cc, feature_dim, num_filters, device='cpu'):
         super().__init__()
 
-
         self.convs = nn.ModuleList(
             [
-                nn.Conv2d(state_cc, num_filters, (7, 7), 5),
+                nn.Conv2d(state_cc, num_filters, (7, 7), 2),
                 nn.Conv2d(num_filters, num_filters, (5, 5), 3),
                 nn.Conv2d(num_filters, num_filters, (5, 5), 3)
             ]
@@ -222,7 +183,6 @@ class SACAEEncoder(nn.Module):
 
         return torch.tanh(x)
 
-
     def copy_conv_weights_from(self, source):
         """Authors use this to tie weights between Actor and Critic encoders. (?)"""
         for i in range(3):
@@ -233,4 +193,188 @@ class SACAEEncoder(nn.Module):
         """Should each model have their own logger? Probably not..."""
         pass
 
-# SACAEEncoder(12, 64, 32)(torch.rand(1, 12, 224, 224))
+
+# class VAE(nn.Module):
+#     def __init__(self, z_dims, state_cc, num_filters, device='cpu'):
+#         super().__init__()
+#         self.z_dims = z_dims
+#
+#
+#
+#         ## ENCODER ##
+#         self.encoder = nn.Sequential(
+#             nn.Conv2d(state_cc, num_filters, (7, 7), 3, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#             nn.Conv2d(num_filters, num_filters, (5, 5), 2, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#             nn.Conv2d(num_filters, num_filters, (5, 5), 2, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#         )
+#         self.mu_fc = nn.Linear(512, self.z_dims)
+#         self.var_fc = nn.Linear(512, self.z_dims)
+#
+#         ## DECODER ##
+#         self.decoder_input = nn.Linear(self.z_dims, 512)
+#         self.decoder = nn.Sequential(
+#             nn.ConvTranspose2d(32, num_filters, (5, 5), 2, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#             nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 2, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#             nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 3, bias=False),
+#             nn.BatchNorm2d(num_filters),
+#             nn.ReLU(),
+#             nn.ConvTranspose2d(num_filters, state_cc, (8, 8), 1, bias=False),
+#             nn.Sigmoid()
+#         )
+#
+#         self.to(device)
+#
+#     def encode(self, x):
+#         x = self.encoder(x)
+#         x = torch.flatten(x, start_dim=1)
+#         mu = self.mu_fc(x)
+#         var = self.var_fc(x)
+#         return mu, var
+#
+#     def reparam(self, mu, var):
+#         std = torch.exp(var / 2)
+#         e = torch.randn_like(std)
+#         return e * std + mu
+#
+#     def decode(self, z):
+#         x = self.decoder_input(z)
+#         x = x.view(-1, 32, 4, 4)
+#         x = self.decoder(x)
+#         return x
+#
+#     def encode_state(self, x):
+#         mu, var = self.encode(x)
+#         z = self.reparam(mu, var)
+#         return z
+#
+#     def forward(self, x):
+#         mu, var = self.encode(x)
+#         z = self.reparam(mu, var)
+#         x_hat = self.decode(z)
+#         return x_hat, mu, var
+#
+
+class VAE(nn.Module):
+    def __init__(self, z_dims, state_cc, num_filters, device='cpu'):
+        super().__init__()
+        self.z_dims = z_dims
+
+
+
+        ## ENCODER ##
+        self.encoder = nn.Sequential(
+            nn.Conv2d(state_cc, num_filters, (7, 7), 3, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(),
+            nn.Conv2d(num_filters, num_filters, (5, 5), 2, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(),
+            nn.Conv2d(num_filters, num_filters, (5, 5), 2, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU()
+        )
+        self.ln = nn.LayerNorm(512)
+        self.mu_fc = nn.Linear(512, self.z_dims)
+        self.var_fc = nn.Linear(512, self.z_dims)
+
+        ## DECODER ##
+        self.decoder_input = nn.Linear(self.z_dims, 512)
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(32, num_filters, (5, 5), 2, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(),
+            nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 2, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(),
+            nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 3, bias=False),
+            # nn.BatchNorm2d(num_filters),
+            nn.ReLU(),
+            nn.ConvTranspose2d(num_filters, state_cc, (8, 8), 1, bias=False),
+            nn.Sigmoid()
+        )
+
+        self.to(device)
+
+    def encode(self, x):
+        x = self.encoder(x)
+        x = torch.flatten(x, start_dim=1)
+        x = self.ln(x)
+        mu = self.mu_fc(x)
+        var = self.var_fc(x)
+        return mu, var
+
+    def reparam(self, mu, var):
+        std = torch.exp(var / 2)
+        e = torch.randn_like(std)
+        return torch.tanh(e * std + mu)
+
+    def decode(self, z):
+        x = self.decoder_input(z)
+        x = x.view(-1, 32, 4, 4)
+        x = self.decoder(x)
+        return x
+
+    def encode_state(self, x):
+        mu, var = self.encode(x)
+        z = self.reparam(mu, var)
+        return z
+
+    def forward(self, x):
+        mu, var = self.encode(x)
+        z = self.reparam(mu, var)
+        x_hat = self.decode(z)
+        return x_hat, mu, var
+
+
+def vae_loss(x, x_hat, mu, var, weight):
+    # Reconstruction error
+    # recon_err = F.binary_cross_entropy(x_hat, x, reduction='sum')
+    recon_err = F.smooth_l1_loss(x_hat, x, reduction='sum')
+
+    # KL
+    kl_div = torch.mean(
+        -0.5 * torch.sum(1 + var - mu ** 2 - var.exp(), dim=1), dim=0
+    )
+
+    return recon_err + weight * kl_div
+
+
+def train_vae(model, optimizer, replay_memory, n_epochs, batch_size, seed, show=False):
+    for i in tqdm(range(n_epochs)):
+        s, _, _, _, _ = replay_memory.sample(batch_size)
+
+        x = []
+
+        for img in s:
+            noisy = img.numpy() + np.random.normal(loc=0.0, scale=0.1, size=img.shape)
+            x.append(np.clip(noisy, 0.0, 1.0))
+
+        x = np.array(x)
+        x = torch.tensor(x).float()
+
+        preds, mu, var = model(x.to('cuda:0'))
+        loss = vae_loss(s.to('cuda:0'), preds, mu, var, 1)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+
+        if i % 100 == 0 & show:
+            img = torch.cat([
+                x[0][0, :, :].unsqueeze(0),
+                preds[0][0, :, :].cpu().unsqueeze(0),
+                s[0][0, :, :].unsqueeze(0)
+            ], dim=2)
+
+            transforms.ToPILImage()(img).save(f'./imgs/vae_{seed}_training_{i}.png')

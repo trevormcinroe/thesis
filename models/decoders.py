@@ -14,11 +14,10 @@ class SACAEDecoder(nn.Module):
 
 		self.deconvs = nn.ModuleList(
 			[
-				nn.ConvTranspose2d(2, num_filters, (5, 5), 3),
-				nn.ConvTranspose2d(num_filters, num_filters, (7, 7), 2),
-				nn.ConvTranspose2d(num_filters, num_filters, (7, 7), 2),
-				nn.ConvTranspose2d(num_filters, num_filters, (7, 7), 1),
-				nn.ConvTranspose2d(num_filters, state_cc, (4, 4), 1)
+				nn.ConvTranspose2d(32, num_filters, (5, 5), 2),
+				nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 2),
+				nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 3),
+				nn.ConvTranspose2d(num_filters, state_cc, (8, 8), 1)
 			]
 		)
 
@@ -26,11 +25,11 @@ class SACAEDecoder(nn.Module):
 
 	def forward(self, x):
 		x = F.relu(self.fc(x))
-		x = x.view(-1, 2, 16, 16)
+		x = x.view(-1, 32, 4, 4)
 		for deconv in self.deconvs:
 			x = F.relu(deconv(x))
 
 		return torch.sigmoid(x)
 
 
-# SACAEDecoder(12, 32, 32)(torch.rand(1, 1, 32))
+# print(SACAEDecoder(3, 32, 32)(torch.rand(1, 1, 32)).shape)

@@ -14,7 +14,7 @@ from torch.distributions import Categorical
 from torch.nn.utils import clip_grad_norm_
 
 from models.decoders import SACAEDecoder
-from models.encoders import SACAEEncoder, SACAEEncoderDiscrete
+from models.encoders import SACAEEncoder, SACAEEncoderDiscrete, PixelEncoder
 from utils import weight_init, gaussian_logprob, squash, soft_update_params
 
 """SOFT ACTOR-CRITIC"""
@@ -426,34 +426,33 @@ class SACActorImages(nn.Module):
 
 
 class SACVNetworkImages(nn.Module):
-	def __init__(self, state_cc, num_filters, num_convs, action_shape, device='cpu'):
+	def __init__(self, action_shape, device='cpu'):
 		super().__init__()
 
-		self.conv_trunk = nn.ModuleList([nn.Conv2d(state_cc, num_filters, (7, 7), 3), nn.ReLU()])
-
-		for _ in range(num_convs - 2):
-			self.conv_trunk.append(
-				nn.Conv2d(num_filters, num_filters, (5, 5), 2)
-			)
-			self.conv_trunk.append(nn.ReLU())
-
-		self.conv_trunk.append(nn.Conv2d(num_filters, num_filters, (5, 5), 2))
-		self.conv_trunk.append(nn.ReLU())
-
-		self.d = nn.Linear(512, action_shape)
+		self.d1 = nn.Sequential(
+			nn.Linear(50 + action_shape, 1024),
+			nn.ReLU(),
+			nn.Linear(1024, 1024),
+			nn.ReLU(),
+			nn.Linear(1024, 1)
+		)
 
 		self.apply(weight_init)
 		self.to(device)
 
-	def forward(self, x):
-		for conv in self.conv_trunk:
-			x = conv(x)
-
-		x = x.view(x.size(0), -1)
-		return self.d(x)
+	def forward(self, x, a):
+		x = torch.cat([x, a], dim=1)
+		return self.d1(x)
 
 
-# print(SACVNetworkImages(state_cc=12, num_filters=32, num_convs=3))
+#
+# v = SACVNetworkImages(state_cc=9, num_filters=32, num_convs=4, action_shape=1)
+# print(v)
+# #
+# s = torch.rand(10, 9, 84, 84)
+# a = torch.rand(10, 1)
+#
+# print(v(s, a))
 
 
 class SACVCriticImages(nn.Module):
@@ -462,18 +461,27 @@ class SACVCriticImages(nn.Module):
 	def __init__(self, state_cc, num_filters, num_convs, action_shape, device='cpu'):
 		super().__init__()
 
-		self.Q1 = SACVNetworkImages(state_cc, num_filters, num_convs, action_shape, device)
-		self.Q2 = SACVNetworkImages(state_cc, num_filters, num_convs, action_shape, device)
+		self.encoder = PixelEncoder(
+			obs_shape=state_cc, feature_dim=50, num_layers=num_convs,
+			num_filters=num_filters, output_logits=False
+		)
 
-	def forward(self, x):
-		return self.Q1(x), self.Q2(x)
+		self.Q1 = SACVNetworkImages(action_shape, device)
+		self.Q2 = SACVNetworkImages(action_shape, device)
+
+		self.apply(weight_init)
+		self.to(device)
+
+	def forward(self, x, a, detach_encoder=False):
+		x = self.encoder(x, detach=detach_encoder)
+		return self.Q1(x, a), self.Q2(x, a)
 
 
 class SACAgentImages:
 	def __init__(self, state_cc, num_filters, num_convs, action_shape, actor_lr, actor_beta,
 				 critic_lr, critic_beta, alpha_lr, alpha_beta, batch_size, critic_target_update_freq,
 				 actor_update_freq, critic_tau, critic_update_freq, init_temperature=0.01, gamma=0.99,
-				 is_discrete=False, device='cpu', clip_grad=False):
+				 is_discrete=False, device='cpu', clip_grad=False, encoder_tau=0.05):
 
 		self.clip_grad = clip_grad
 		self.device = device
@@ -491,6 +499,9 @@ class SACAgentImages:
 
 		# copying weights from active critic to target critic
 		self.critic_target.load_state_dict(self.critic.state_dict())
+
+		# need to tie the weights of all encoders...
+		self.actor.encoder.copy_conv_weights_from(self.critic.encoder)
 
 		# entropy term
 		self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
@@ -1425,42 +1436,40 @@ class SACAEAgent:
 class SACContinuousActorImages(nn.Module):
 	"""MLP actor network."""
 
-	def __init__(self, state_cc, num_filters, num_convs, action_shape, device='cpu', sigma_min=1e-6, sigma_max=2):
+	def __init__(self, state_cc, num_filters, num_convs, action_shape, device='cpu', sigma_min=-10, sigma_max=2):
 		super().__init__()
 
 		self.sigma_min = sigma_min
 		self.sigma_max = sigma_max
 
-		self.conv_trunk = nn.ModuleList([nn.Conv2d(state_cc, num_filters, (7, 7), 3), nn.ReLU()])
+		self.encoder = PixelEncoder(
+			obs_shape=state_cc, feature_dim=50, num_layers=num_convs,
+			num_filters=num_filters, output_logits=False
+		)
 
-		for _ in range(num_convs - 2):
-			self.conv_trunk.append(
-				nn.Conv2d(num_filters, num_filters, (5, 5), 2)
-			)
-			self.conv_trunk.append(nn.ReLU())
-
-		self.conv_trunk.append(nn.Conv2d(num_filters, num_filters, (5, 5), 2))
-		self.conv_trunk.append(nn.ReLU())
-
-		self.d1 = nn.Linear(512, 2 * action_shape)
+		self.d1 = nn.Sequential(
+			nn.Linear(50, 1024),
+			nn.ReLU(),
+			nn.Linear(1024, 1024),
+			nn.ReLU(),
+			nn.Linear(1024, 2 * action_shape)
+		)
 
 		self.apply(weight_init)
 		self.to(device)
 
-	def forward(self, x, compute_pi=True, compute_log_pi=True):
+	def forward(self, x, compute_pi=True, compute_log_pi=True, detach_encoder=False):
 
-		for conv in self.conv_trunk:
-			x = conv(x)
-
-		x = x.view(x.size(0), -1)
-
+		x = self.encoder(x, detach=detach_encoder)
 		mu, log_std = self.d1(x).chunk(2, dim=-1)
+
 
 		# constrain log_std inside [log_std_min, log_std_max]
 		log_std = torch.tanh(log_std)
 		log_std = self.sigma_min + 0.5 * (
 				self.sigma_max - self.sigma_min
 		) * (log_std + 1)
+
 
 		# self.outputs['mu'] = mu
 		# self.outputs['std'] = log_std.exp()
@@ -1486,8 +1495,8 @@ class SACContinuousActorImages(nn.Module):
 class SACContinuousAgentImages:
 	def __init__(self, state_cc, num_filters, num_convs, action_shape, actor_lr, actor_beta,
 				 critic_lr, critic_beta, alpha_lr, alpha_beta, batch_size, critic_target_update_freq,
-				 actor_update_freq, critic_tau, critic_update_freq, init_temperature=0.01, gamma=0.99,
-				 is_discrete=False, device='cpu', clip_grad=False):
+				 actor_update_freq, critic_tau, critic_update_freq, encoder_lr, init_temperature=0.01,
+				 gamma=0.99, is_discrete=False, device='cpu', clip_grad=False, encoder_tau=0.05):
 		self.clip_grad = clip_grad
 		self.device = device
 		self.is_discrete = is_discrete
@@ -1497,6 +1506,7 @@ class SACContinuousAgentImages:
 		self.actor_update_freq = actor_update_freq
 		self.critic_update_freq = critic_update_freq
 		self.critic_tau = critic_tau
+		self.encoder_tau = encoder_tau
 
 		self.actor = SACContinuousActorImages(state_cc, num_filters, num_convs, action_shape, device)
 		self.critic = SACVCriticImages(state_cc, num_filters, num_convs, action_shape, device)
@@ -1504,6 +1514,9 @@ class SACContinuousAgentImages:
 
 		# copying weights from active critic to target critic
 		self.critic_target.load_state_dict(self.critic.state_dict())
+
+		# tie encoders between actor and critic, and CURL and critic
+		self.actor.encoder.copy_conv_weights_from(self.critic.encoder)
 
 		self.log_alpha = torch.tensor(np.log(init_temperature)).to(self.device)
 		self.log_alpha.requires_grad = True
@@ -1523,10 +1536,23 @@ class SACContinuousAgentImages:
 			[self.log_alpha], lr=alpha_lr, betas=(alpha_beta, 0.999)
 		)
 
+		# optimizer for critic encoder for reconstruction loss
+		self.encoder_optimizer = torch.optim.Adam(
+			self.critic.encoder.parameters(), lr=encoder_lr
+		)
+
 		# for reporting
 		self.actor_losses = []
 		self.critic_losses = []
 		self.qs = []
+
+		self.train()
+		self.critic_target.train()
+
+	def train(self, training=True):
+		self.training = training
+		self.actor.train(training)
+		self.critic.train(training)
 
 	@property
 	def alpha(self):
@@ -1544,7 +1570,7 @@ class SACContinuousAgentImages:
 
 	def sample_action(self, obs):
 		with torch.no_grad():
-			_, pi, _, _ = self.actor(obs, compute_log_pi=False)
+			mu, pi, _, _ = self.actor(obs, compute_log_pi=False)
 			return pi.cpu().data.numpy().flatten()
 
 	def update(self, replay_buffer, step, report=False):
@@ -1554,7 +1580,7 @@ class SACContinuousAgentImages:
 		# .unsqueeze(1): [1, 2, 3] --> [[1], [2], [3]]
 		if step % self.critic_update_freq == 0:
 			self.update_critic(s.to(self.device),
-							   a.to(self.device).unsqueeze(1),
+							   a.to(self.device),
 							   r.to(self.device).unsqueeze(1),
 							   s_.to(self.device),
 							   t.to(self.device).unsqueeze(1),
@@ -1568,11 +1594,12 @@ class SACContinuousAgentImages:
 		if step % self.critic_target_update_freq == 0:
 			soft_update_params(self.critic.Q1, self.critic_target.Q1, self.critic_tau)
 			soft_update_params(self.critic.Q2, self.critic_target.Q2, self.critic_tau)
+			soft_update_params(self.critic.encoder, self.critic_target.encoder, self.encoder_tau)
 
 	def update_critic(self, obs, action, reward, next_obs, not_done, report):
 		with torch.no_grad():
 			_, policy_action, log_pi, _ = self.actor(next_obs)
-			target_Q1, target_Q2 = self.critic_target(next_obs)
+			target_Q1, target_Q2 = self.critic_target(next_obs, policy_action)
 			target_V = torch.min(target_Q1, target_Q2) - self.alpha.detach() * log_pi
 			target_Q = reward + (not_done * self.gamma * target_V)
 
@@ -1580,7 +1607,7 @@ class SACContinuousAgentImages:
 				self.qs.append(torch.min(target_Q1, target_Q2).mean().item())
 
 		# get current Q estimates
-		current_Q1, current_Q2 = self.critic(obs)
+		current_Q1, current_Q2 = self.critic(obs, action)
 
 		# JQ = 𝔼_{st,at}~D[0.5(Q(st,at) - r(st,at) + γ(𝔼_{s_{t+1}~p}[V(s_{t+1})]))^2]
 		critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
@@ -1590,8 +1617,8 @@ class SACContinuousAgentImages:
 		self.critic_optimizer.zero_grad()
 		critic_loss.backward()
 
-		if self.clip_grad is not None:
-			clip_grad_norm_(self.critic.parameters(), self.clip_grad)
+		# if self.clip_grad is not None:
+		# 	clip_grad_norm_(self.critic.parameters(), self.clip_grad)
 
 		self.critic_optimizer.step()
 
@@ -1599,8 +1626,9 @@ class SACContinuousAgentImages:
 			self.critic_losses.append(critic_loss.item())
 
 	def update_actor_and_alpha(self, obs, report):
-		_, pi, log_pi, log_std = self.actor(obs)
-		actor_Q1, actor_Q2 = self.critic(obs)
+		# TODO: why do we not want to propagate Actor's loss through the encoder?
+		_, pi, log_pi, log_std = self.actor(obs, detach_encoder=True)
+		actor_Q1, actor_Q2 = self.critic(obs, pi, detach_encoder=True)
 		actor_Q = torch.min(actor_Q1, actor_Q2)
 		actor_loss = (self.alpha.detach() * log_pi - actor_Q).mean()
 
@@ -1610,8 +1638,8 @@ class SACContinuousAgentImages:
 		self.actor_optimizer.zero_grad()
 		actor_loss.backward()
 
-		if self.clip_grad is not None:
-			clip_grad_norm_(self.actor.parameters(), self.clip_grad)
+		# if self.clip_grad is not None:
+		# 	clip_grad_norm_(self.actor.parameters(), self.clip_grad)
 
 		self.actor_optimizer.step()
 

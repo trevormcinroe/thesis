@@ -55,7 +55,7 @@ env.seed(args.seed)
 torch.manual_seed(args.seed)
 np.random.seed(args.seed)
 
-env = FrameStackEnv(env, 9, 'tensors')
+env = FrameStackEnv(env, 3, 'tensors')
 
 agent = SACAgentImages(
 	state_cc=9,
@@ -84,7 +84,7 @@ writer = SummaryWriter(log_dir=f'./{args.experiment_name}/logs/{args.name}')
 
 
 # exploration
-N_EXPLORE = 100
+N_EXPLORE = 10
 for _ in tqdm(range(N_EXPLORE)):
 	s = env.reset()
 

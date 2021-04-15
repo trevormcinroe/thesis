@@ -11,6 +11,24 @@ from torchvision.transforms import ToTensor
 from torch.distributions import Categorical
 import gym
 
+
+
+class eval_mode(object):
+    def __init__(self, *models):
+        self.models = models
+
+    def __enter__(self):
+        self.prev_states = []
+        for model in self.models:
+            self.prev_states.append(model.training)
+            model.train(False)
+
+    def __exit__(self, *args):
+        for model, state in zip(self.models, self.prev_states):
+            model.train(state)
+        return False
+
+
 def inspect_episode(agent, env, device, experiment_name, step):
 
     info = {
@@ -92,25 +110,26 @@ def make_pca_plot(model, states, scaled_rewards, title, save_name):
     plt.savefig(save_name)
 
 
-# def weight_init(m):
-#     """Custom weight init for Conv2D and Linear layers."""
-#     if isinstance(m, nn.Linear):
-#         nn.init.orthogonal_(m.weight.data)
-#         m.bias.data.fill_(0.0)
-#     elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
-#         # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
-#         assert m.weight.size(2) == m.weight.size(3)
-#         m.weight.data.fill_(0.0)
-#         m.bias.data.fill_(0.0)
-#         mid = m.weight.size(2) // 2
-#         gain = nn.init.calculate_gain('relu')
-#         nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
-
 def weight_init(m):
+    """Custom weight init for Conv2D and Linear layers."""
     pass
-    # if isinstance(m, nn.Linear):
-    #     torch.nn.init.xavier_uniform_(m.weight, gain=1)
-    #     torch.nn.init.constant_(m.bias, 0)
+        # if isinstance(m, nn.Linear):
+        #     nn.init.orthogonal_(m.weight.data)
+        #     m.bias.data.fill_(0.0)
+        # elif isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
+        #     # delta-orthogonal init from https://arxiv.org/pdf/1806.05393.pdf
+        #     assert m.weight.size(2) == m.weight.size(3)
+        #     m.weight.data.fill_(0.0)
+        #     m.bias.data.fill_(0.0)
+        #     mid = m.weight.size(2) // 2
+        #     gain = nn.init.calculate_gain('relu')
+        #     nn.init.orthogonal_(m.weight.data[:, :, mid, mid], gain)
+
+# def weight_init(m):
+#     pass
+#     # if isinstance(m, nn.Linear):
+#     #     torch.nn.init.xavier_uniform_(m.weight, gain=1)
+#     #     torch.nn.init.constant_(m.bias, 0)
 
 
 def gaussian_logprob(noise, log_std):
@@ -121,7 +140,7 @@ def gaussian_logprob(noise, log_std):
 
 def squash(mu, pi, log_pi):
     """Apply squashing function.
-    See appendix C from https://arxiv.org/pdf/1812.05905.pdf. (SAC PAPER)
+    See appendix C from https://arxiv.org/pdf/1812.05905.pdf.
     """
     mu = torch.tanh(mu)
     if pi is not None:
@@ -292,3 +311,55 @@ class FrameStack(gym.Wrapper):
     def _get_obs(self):
         assert len(self._frames) == self._k
         return np.concatenate(list(self._frames), axis=0)
+
+
+def sanity_check(model1, model2):
+    for p1, p2 in zip(model1.parameters(), model2.parameters()):
+        if not torch.all(p1.eq(p2)):
+            return False
+    return True
+
+
+def eval_agent(env, agent, num_episodes):
+    collected_rs = []
+
+    for _ in range(num_episodes):
+        s = env.reset()
+        s = torch.tensor(s / 255.).float()
+        episode_r = 0
+        done = False
+
+        while not done:
+            with eval_mode(agent):
+                a = agent.select_action(s.unsqueeze(0).to('cuda:0'))
+            s, r, done, _ = env.step(a)
+            s = torch.tensor(s / 255.).float()
+            episode_r += r
+
+        collected_rs.append(episode_r)
+
+    return np.mean(collected_rs)
+
+
+def eval_representation(model, replay_memory):
+    err_hist = []
+
+    W = torch.nn.parameter.Parameter(torch.rand(1, 50)).to('cuda:0')
+    torch.nn.init.normal_(W)
+    W_optim = torch.optim.Adam([W.data], lr=1e-4)
+
+    for _ in range(50):
+        s, _, r, _, _ = replay_memory.sample(256)
+        out = torch.matmul(model(s.to('cuda')).detach(), W.T)
+        loss = F.mse_loss(out, r.unsqueeze(-1).to('cuda:0'))
+        W_optim.zero_grad()
+        loss.backward()
+        W_optim.step()
+
+    for _ in range(100):
+        s, _, r, _, _ = replay_memory.sample(256)
+        out = torch.matmul(model(s.to('cuda')).detach(), W.T)
+        loss = F.mse_loss(out, r.unsqueeze(-1).to('cuda:0'))
+        err_hist.append(loss.item())
+
+    return np.mean(err_hist)

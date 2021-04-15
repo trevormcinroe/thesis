@@ -12,6 +12,7 @@ class ReplayMemory:
 		if np.any([isinstance(s_shape, list), isinstance(s_shape, tuple)]):
 			self.s = torch.zeros((mem_size, *s_shape))
 			self.a = torch.zeros((mem_size, a_shape))
+			# self.a = torch.zeros(mem_size)
 			self.r = torch.zeros(mem_size)
 			self.s_ = torch.zeros((mem_size, *s_shape))
 			self.t = torch.zeros(mem_size)

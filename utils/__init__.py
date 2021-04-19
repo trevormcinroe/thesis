@@ -10,7 +10,7 @@ from collections import deque
 from torchvision.transforms import ToTensor
 from torch.distributions import Categorical
 import gym
-
+from skimage.util.shape import view_as_windows
 
 
 class eval_mode(object):
@@ -363,3 +363,44 @@ def eval_representation(model, replay_memory):
         err_hist.append(loss.item())
 
     return np.mean(err_hist)
+
+
+def random_crop(imgs, output_size):
+    """
+    Vectorized way to do random crop using sliding windows
+    and picking out random ones
+    args:
+        imgs, batch images with shape (B,C,H,W)
+    """
+    # batch size
+    n = imgs.shape[0]
+    img_size = imgs.shape[-1]
+    crop_max = img_size - output_size
+    imgs = np.transpose(imgs, (0, 2, 3, 1))
+    w1 = np.random.randint(0, crop_max, n)
+    h1 = np.random.randint(0, crop_max, n)
+    # creates all sliding windows combinations of size (output_size)
+    windows = view_as_windows(
+        imgs, (1, output_size, output_size, 1))[..., 0,:,:, 0]
+    # selects a random window for each batch element
+    cropped_imgs = windows[np.arange(n), w1, h1]
+    return cropped_imgs
+
+def center_crop_image(image, output_size):
+    """images are coming in [b, c, h, w]"""
+    h, w = image.shape[2:]
+
+    new_h, new_w = output_size, output_size
+
+    top = (h - new_h)//2
+    left = (w - new_w)//2
+
+    # we want to keep b anc c...
+    image = image[:, :, top:top + new_h, left:left + new_w]
+    return image
+
+
+def byol_loss(x, y):
+    x = F.normalize(x, dim=-1, p=2)
+    y = F.normalize(y, dim=-1, p=2)
+    return 2 - 2 * (x * y).sum(dim=-1)

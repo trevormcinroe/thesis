@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
+from utils import random_crop, center_crop_image
 
 # TODO: how to norm rewards?
 
@@ -41,20 +42,59 @@ class ReplayMemory:
 
 		self.mem_cntr += 1
 
-	def sample(self, batch_size):
+	def sample(self, batch_size, cpc=False, noise=False):
 		"""We should probably handle the max_size<batch_size elsewhere?"""
 		max_size = min(self.mem_cntr, self.mem_size)
 		idxs = np.random.choice(max_size, size=batch_size, replace=False)
+
+		if cpc:
+			obses = self.s[idxs]
+			next_obses = self.s_[idxs]
+			pos = obses.detach().clone()
+
+			obses = random_crop(obses.numpy(), 84)
+			next_obses = random_crop(next_obses.numpy(), 84)
+			pos = random_crop(pos.numpy(), 84)
+
+			obses = torch.tensor(obses)
+			next_obses = torch.tensor(next_obses)
+			pos = torch.tensor(pos)
+			cpc_kwargs = dict(
+				obs_anchor=obses, obs_pos=pos,
+				time_anchor=None, time_pos=None
+			)
+
+			return obses, self.a[idxs], self.r[idxs], next_obses, self.t[idxs], cpc_kwargs
+
+
+		if noise:
+			obses = self.s[idxs]
+			next_obses = self.s_[idxs]
+			pos = obses.detach().clone()
+
+			obses = center_crop_image(obses.numpy(), 84)
+			next_obses = center_crop_image(next_obses.numpy(), 84)
+			pos = center_crop_image(pos.numpy(), 84)
+
+			obses = torch.tensor(obses)
+			next_obses = torch.tensor(next_obses)
+			pos = torch.tensor(pos)
+			cpc_kwargs = dict(
+				obs_anchor=obses, obs_pos=pos,
+				time_anchor=None, time_pos=None
+			)
+
+			return obses, self.a[idxs], self.r[idxs], next_obses, self.t[idxs], cpc_kwargs
 
 		if self.norm:
 			self.mean = torch.mean(self.r[:max_size])
 			self.std = torch.std(self.r[:max_size])
 			r = self.r[idxs]
 			r = (r - self.mean) / (self.std + 1e-8)
-			return self.s[idxs], self.a[idxs], r, self.s_[idxs], self.t[idxs]
+			return self.s[idxs], self.a[idxs], r, self.s_[idxs], self.t[idxs], None
 
 		else:
-			return self.s[idxs], self.a[idxs], self.r[idxs], self.s_[idxs], self.t[idxs]
+			return self.s[idxs], self.a[idxs], self.r[idxs], self.s_[idxs], self.t[idxs], None
 
 
 class RolloutStorage:

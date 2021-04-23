@@ -31,25 +31,44 @@ parser.add_argument('--n-steps', type=int, default=100000, help='number of steps
 parser.add_argument('--name', help='experiment name')
 parser.add_argument('--experiment-name', help='experiment name')
 parser.add_argument('--init-steps', type=int, default=1000)
-parser.add_argument('--eval-freq', type=int, default=1000)
+parser.add_argument('--eval-freq', type=int, default=2500)
+parser.add_argument('--cpc', type=int, default=999999999)
+parser.add_argument('--ri2r', type=int, default=9999999)
+parser.add_argument('--decoder', type=int, default=9999999)
+
 
 args = parser.parse_args()
 
-env = dmc2gym.make(
-	domain_name='cartpole',
-	task_name='swingup',
-	seed=args.seed,
-	visualize_reward=False,
-	from_pixels=True,
-	height=84,
-	width=84,
-	frame_skip=8
-)
+if args.cpc < 1000: #or args.ri2r < 1000:
+	env = dmc2gym.make(
+		domain_name='reacher',
+		task_name='easy',
+		seed=args.seed,
+		visualize_reward=False,
+		from_pixels=True,
+		height=100,
+		width=100,
+		frame_skip=4
+	)
+else:
+	env = dmc2gym.make(
+		domain_name='walker',
+		task_name='walk',
+		seed=args.seed,
+		visualize_reward=False,
+		from_pixels=True,
+		height=84,
+		width=84,
+		frame_skip=2
+	)
 
 env = FrameStack(env, 3)
 
 action_shape = env.action_space.shape[0]
 episodes_between_eval = args.eval_freq // env._max_episode_steps
+
+print(env._max_episode_steps)
+print(episodes_between_eval)
 
 env.seed(args.seed)
 torch.manual_seed(args.seed)
@@ -76,10 +95,32 @@ agent = SACContinuousAgentImages(
 	device='cuda:0',
 	clip_grad=False,
 	encoder_tau=0.05,
-	encoder_lr=1e-3
+	encoder_lr=1e-3,
+	cpc_update_freq=args.cpc,
+	ri2r_update_freq=args.ri2r,
+	decoder_update_freq=args.decoder
 )
 # print(sanity_check(agent.actor.encoder.convs, agent.critic.encoder.convs))
-replay_memory = ReplayMemory(mem_size=100000, s_shape=[9, 84, 84], a_shape=action_shape, norm=False)
+
+if agent.cpc_update_freq < 1000:
+	replay_memory = ReplayMemory(mem_size=100000, s_shape=[9, 100, 100], a_shape=action_shape, norm=False)
+	cpc = True
+	noise = False
+elif args.ri2r < 1000:
+	replay_memory = ReplayMemory(mem_size=100000, s_shape=[9, 84, 84], a_shape=action_shape, norm=False)
+	noise = True
+	cpc = False
+else:
+	replay_memory = ReplayMemory(mem_size=100000, s_shape=[9, 84, 84], a_shape=action_shape, norm=False)
+	cpc = False
+	noise = False
+
+# if args.ri2r < 1000:
+# 	noise = True
+# else:
+# 	noise = False
+
+print(noise)
 
 writer = SummaryWriter(log_dir=f'./{args.experiment_name}/logs/{args.name}')
 
@@ -123,9 +164,16 @@ global_steps = 0
 episode = 0
 eval_episode = 0
 
+data_root = '/media/trevor/mariadb/thesis'
 
-if not os.path.isdir(f'./{args.experiment_name}/{args.name}_encoder/'):
-	os.mkdir(f'./{args.experiment_name}/{args.name}_encoder/')
+if not os.path.isdir(f'{data_root}/{args.experiment_name}'):
+	os.mkdir(f'{data_root}/{args.experiment_name}')
+
+if not os.path.isdir(f'{data_root}/{args.experiment_name}/{args.name}_encoder/'):
+	os.mkdir(f'{data_root}/{args.experiment_name}/{args.name}_encoder/')
+
+if not os.path.isdir(f'{data_root}/{args.experiment_name}/{args.name}/'):
+	os.mkdir(f'{data_root}/{args.experiment_name}/{args.name}/')
 
 print('training...')
 while global_steps < args.n_steps:
@@ -133,17 +181,19 @@ while global_steps < args.n_steps:
 	inner_r = []
 
 	# It's important that we reset the env before going back into training mode...
-	if global_steps % episodes_between_eval == 0:
-		print(episode)
+	if episode % episodes_between_eval == 0:
+
 		eval_hist.append(eval_agent(env, agent, 10))
+		print(f'{episode}: {np.mean(eval_hist[-5:])}')
 		# err_hist.append(eval_representation(agent.critic.encoder, replay_memory))
 		writer.add_scalar('Eval reward', np.mean(eval_hist[-5:]), eval_episode)
 		# writer.add_scalar('Eval repr', np.mean(err_hist[-5:]), eval_episode)
 		eval_episode += 1
 
+	if global_steps % 2500 == 0:
 		torch.save(
-			agent.critic.encoder.state_dict(),
-			f'./{args.experiment_name}/{args.name}_encoder/{global_steps}.pt'
+			agent.critic.state_dict(),
+			f'{data_root}/{args.experiment_name}/{args.name}_encoder/{global_steps}.pt'
 		)
 
 	s = env.reset()
@@ -152,7 +202,6 @@ while global_steps < args.n_steps:
 	steps = 0
 
 	episode_reward = 0
-
 
 	while not done:
 		with eval_mode(agent):
@@ -165,7 +214,7 @@ while global_steps < args.n_steps:
 
 		s_ = torch.tensor(s_ / 255.).float()
 
-		agent.update(replay_memory, global_steps, True)
+		agent.update(replay_memory, global_steps, True, cpc, noise)
 
 		# Some infinite bootstrapping
 		# i.e., never returns the '1.0' flag for done, since there is not target goal state
@@ -203,11 +252,18 @@ while global_steps < args.n_steps:
 	# 	print(t)
 
 
-with open(f'./{args.experiment_name}/{args.name}_training.data', 'wb') as f:
+with open(f'{data_root}/{args.experiment_name}/{args.name}_training.data', 'wb') as f:
 	pickle.dump(reward_hist, f)
 
-with open(f'./{args.experiment_name}/{args.name}_eval.data', 'wb') as f:
+with open(f'{data_root}/{args.experiment_name}/{args.name}_eval.data', 'wb') as f:
 	pickle.dump(eval_hist, f)
 
-with open(f'./{args.experiment_name}/{args.name}_repr.data', 'wb') as f:
+with open(f'{data_root}/{args.experiment_name}/{args.name}_repr.data', 'wb') as f:
 	pickle.dump(err_hist, f)
+
+# torch.save(
+# 	agent.actor.state_dict(),
+# 	f'{data_root}/{args.experiment_name}/{args.name}_actor/{global_steps}.pt'
+# )
+
+agent.save(model_dir=f'{data_root}/{args.experiment_name}/{args.name}', step=global_steps)

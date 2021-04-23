@@ -381,7 +381,7 @@ def random_crop(imgs, output_size):
     h1 = np.random.randint(0, crop_max, n)
     # creates all sliding windows combinations of size (output_size)
     windows = view_as_windows(
-        imgs, (1, output_size, output_size, 1))[..., 0,:,:, 0]
+        imgs, (1, output_size, output_size, 1))[..., 0, :, :, 0]
     # selects a random window for each batch element
     cropped_imgs = windows[np.arange(n), w1, h1]
     return cropped_imgs
@@ -404,3 +404,14 @@ def byol_loss(x, y):
     x = F.normalize(x, dim=-1, p=2)
     y = F.normalize(y, dim=-1, p=2)
     return 2 - 2 * (x * y).sum(dim=-1)
+
+
+def r_proj_loss(z_online, z_target, r_online, r_target):
+    z_online = F.normalize(z_online, dim=-1, p=2)
+    z_target = F.normalize(z_target, dim=-1, p=2)
+
+    z_dist = 2 - 2 * (z_online * z_target).sum(dim=-1)
+
+    r_dist = torch.abs_(r_online - r_target).squeeze()
+
+    return (z_dist - r_dist).mean()

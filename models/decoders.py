@@ -1,35 +1,48 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-
+from models.encoders import OUT_DIM
 
 class SACAEDecoder(nn.Module):
-	"""feature_dim = z-dim"""
-	def __init__(self, state_cc, feature_dim, num_filters, device='cpu'):
-		super().__init__()
+    def __init__(self, obs_shape, feature_dim, num_layers=2, num_filters=32):
+        super().__init__()
 
-		self.num_filters = num_filters
+        self.num_layers = num_layers
+        self.num_filters = num_filters
+        self.out_dim = OUT_DIM[num_layers]
 
-		self.fc = nn.Linear(feature_dim, 512)
+        self.fc = nn.Linear(
+            feature_dim, num_filters * self.out_dim * self.out_dim
+        )
 
-		self.deconvs = nn.ModuleList(
-			[
-				nn.ConvTranspose2d(32, num_filters, (5, 5), 2),
-				nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 2),
-				nn.ConvTranspose2d(num_filters, num_filters, (5, 5), 3),
-				nn.ConvTranspose2d(num_filters, state_cc, (8, 8), 1)
-			]
-		)
+        self.deconvs = nn.ModuleList()
 
-		self.to(device)
+        for i in range(self.num_layers - 1):
+            self.deconvs.append(
+                nn.ConvTranspose2d(num_filters, num_filters, 3, stride=1)
+            )
+        self.deconvs.append(
+            nn.ConvTranspose2d(
+                num_filters, obs_shape[0], 3, stride=2, output_padding=1
+            )
+        )
 
-	def forward(self, x):
-		x = F.relu(self.fc(x))
-		x = x.view(-1, 32, 4, 4)
-		for deconv in self.deconvs:
-			x = F.relu(deconv(x))
+        self.outputs = dict()
 
-		return torch.sigmoid(x)
+    def forward(self, h):
+        h = torch.relu(self.fc(h))
+        self.outputs['fc'] = h
 
+        deconv = h.view(-1, self.num_filters, self.out_dim, self.out_dim)
+        self.outputs['deconv1'] = deconv
+
+        for i in range(0, self.num_layers - 1):
+            deconv = torch.relu(self.deconvs[i](deconv))
+            self.outputs['deconv%s' % (i + 1)] = deconv
+
+        obs = self.deconvs[-1](deconv)
+        self.outputs['obs'] = obs
+
+        return obs
 
 # print(SACAEDecoder(3, 32, 32)(torch.rand(1, 1, 32)).shape)

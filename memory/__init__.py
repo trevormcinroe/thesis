@@ -72,9 +72,10 @@ class ReplayMemory:
 			next_obses = self.s_[idxs]
 			pos = obses.detach().clone()
 
-			obses = center_crop_image(obses.numpy(), 84)
-			next_obses = center_crop_image(next_obses.numpy(), 84)
-			pos = center_crop_image(pos.numpy(), 84)
+			# Commented out for multi-experiments in a row without augmentations
+			# obses = center_crop_image(obses.numpy(), 84)
+			# next_obses = center_crop_image(next_obses.numpy(), 84)
+			# pos = center_crop_image(pos.numpy(), 84)
 
 			obses = torch.tensor(obses)
 			next_obses = torch.tensor(next_obses)

@@ -15,7 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from models.decoders import SACAEDecoder
 from models.encoders import SACAEEncoder, SACAEEncoderDiscrete, PixelEncoder
-from utils import weight_init, gaussian_logprob, squash, soft_update_params, center_crop_image, byol_loss
+from utils import weight_init, gaussian_logprob, preprocess_obs, squash, soft_update_params, center_crop_image, byol_loss, r_proj_loss
 
 """SOFT ACTOR-CRITIC"""
 
@@ -1495,7 +1495,7 @@ class SACContinuousActorImages(nn.Module):
 class SACContinuousAgentImages:
 	def __init__(self, state_cc, num_filters, num_convs, action_shape, actor_lr, actor_beta,
 				 critic_lr, critic_beta, alpha_lr, alpha_beta, batch_size, critic_target_update_freq,
-				 actor_update_freq, cpc_update_freq, ri2r_update_freq,
+				 actor_update_freq, cpc_update_freq, ri2r_update_freq, decoder_update_freq,
 				 critic_tau, critic_update_freq, encoder_lr, init_temperature=0.01,
 				 gamma=0.99, is_discrete=False, device='cpu', clip_grad=False, encoder_tau=0.05):
 		self.clip_grad = clip_grad
@@ -1510,10 +1510,17 @@ class SACContinuousAgentImages:
 		self.encoder_tau = encoder_tau
 		self.cpc_update_freq = cpc_update_freq
 		self.ri2r_update_freq = ri2r_update_freq
+		self.decoder_update_freq = decoder_update_freq
 
 		self.actor = SACContinuousActorImages(state_cc, num_filters, num_convs, action_shape, device)
 		self.critic = SACVCriticImages(state_cc, num_filters, num_convs, action_shape, device)
 		self.critic_target = SACVCriticImages(state_cc, num_filters, num_convs, action_shape, device)
+
+		# decoder that is used for SACAE
+		self.decoder = SACAEDecoder([9], 50, 4, 32).to(self.device)
+		self.decoder.apply(weight_init)
+		self.decoder_optimizer = torch.optim.Adam(self.decoder.parameters(), lr=1e-3,
+												  weight_decay=1e-7)
 
 		# copying weights from active critic to target critic
 		self.critic_target.load_state_dict(self.critic.state_dict())
@@ -1568,6 +1575,7 @@ class SACContinuousAgentImages:
 		self.actor.train(training)
 		self.critic.train(training)
 		self.CURL.train(training)
+		self.decoder.train(training)
 
 	@property
 	def alpha(self):
@@ -1575,7 +1583,7 @@ class SACContinuousAgentImages:
 
 	def select_action(self, obs):
 		"""Deterministic action-selection"""
-		if self.cpc_update_freq < 1000 or self.ri2r_update_freq < 1000:
+		if self.cpc_update_freq < 1000: #or self.ri2r_update_freq < 1000:
 			obs = center_crop_image(obs, 84)
 
 		with torch.no_grad():
@@ -1587,7 +1595,7 @@ class SACContinuousAgentImages:
 			return mu.cpu().data.numpy().flatten()
 
 	def sample_action(self, obs):
-		if self.cpc_update_freq < 1000 or self.ri2r_update_freq < 1000:
+		if self.cpc_update_freq < 1000: #or self.ri2r_update_freq < 1000:
 			obs = center_crop_image(obs, 84)
 
 		with torch.no_grad():
@@ -1600,7 +1608,6 @@ class SACContinuousAgentImages:
 		# (1) Critic
 		# .unsqueeze(1): [1, 2, 3] --> [[1], [2], [3]]
 		if step % self.critic_update_freq == 0:
-
 			# for _ in range(3):
 			self.update_critic(s.to(self.device),
 							   a.to(self.device),
@@ -1631,6 +1638,12 @@ class SACContinuousAgentImages:
 		else:
 			if step % self.ri2r_update_freq == 0:
 				self.update_ri2r(s.to(self.device), a.to(self.device), r.to(self.device), s_.to(self.device), cpc_kwargs)
+
+		if self.decoder_update_freq > 999:
+			pass
+		else:
+			if step % self.decoder_update_freq == 0:
+				self.update_decoder(s.to(self.device), s.to(self.device))
 
 	def update_critic(self, obs, action, reward, next_obs, not_done, report):
 		with torch.no_grad():
@@ -1704,14 +1717,13 @@ class SACContinuousAgentImages:
 		self.cpc_optimizer.step()
 
 	def update_ri2r(self, s, a, r, s_, noise):
-		z_, z_hat, shuffled_z, shuffled_r, encoded_z = self.ri2r.encode(s, a, r, s_, noise)
+		z_, z_hat = self.ri2r.encode(s, a, r, s_, noise)
 
 		latent_loss = self.byol_loss(z_, z_hat)
 
-		# proj_loss = F.mse_loss(torch.norm(shuffled_z - encoded_z, dim=1, p=1).reshape((-1, 1)),
-		# 					   torch.abs_(shuffled_r - r).reshape(-1, 1))
+		# proj_loss =r_proj_loss(z_online, z_target, r_online, r_target)
 
-		ri2r_loss = latent_loss.mean()
+		ri2r_loss = latent_loss.mean() # + proj_loss
 
 		self.encoder_optimizer.zero_grad()
 		self.ri2r_optimizer.zero_grad()
@@ -1720,6 +1732,25 @@ class SACContinuousAgentImages:
 
 		self.encoder_optimizer.step()
 		self.ri2r_optimizer.step()
+
+	def update_decoder(self, obs, target_obs):
+		h = self.critic.encoder(obs)
+
+		target_obs = preprocess_obs(target_obs)
+		rec_obs = self.decoder(h)
+		rec_loss = F.mse_loss(target_obs, rec_obs)
+
+		# add L2 penalty on latent representation
+		# see https://arxiv.org/pdf/1903.12436.pdf
+		latent_loss = (0.5 * h.pow(2).sum(1)).mean()
+
+		loss = rec_loss + 1e-6 * latent_loss
+		self.encoder_optimizer.zero_grad()
+		self.decoder_optimizer.zero_grad()
+		loss.backward()
+
+		self.encoder_optimizer.step()
+		self.decoder_optimizer.step()
 
 	def clear_losses(self):
 		self.actor_losses = []
@@ -1739,9 +1770,18 @@ class SACContinuousAgentImages:
 				'%s/decoder_%s.pt' % (model_dir, step)
 			)
 
+		self.save_curl(model_dir, step)
+
+		self.save_ri2r(model_dir, step)
+
 	def save_curl(self, model_dir, step):
 		torch.save(
 			self.CURL.state_dict(), '%s/curl_%s.pt' % (model_dir, step)
+		)
+
+	def save_ri2r(self, model_dir, step):
+		torch.save(
+			self.ri2r.state_dict(), '%s/ri2r_%s.pt' % (model_dir, step)
 		)
 
 	def load(self, model_dir, step):
@@ -1755,6 +1795,14 @@ class SACContinuousAgentImages:
 			self.decoder.load_state_dict(
 				torch.load('%s/decoder_%s.pt' % (model_dir, step))
 			)
+
+		self.CURL.load_state_dict(
+			torch.load('%s/curl_%s.pt' % (model_dir, step))
+		)
+
+		self.ri2r.load_state_dict(
+			torch.load('%s/ri2r_%s.pt' % (model_dir, step))
+		)
 
 
 class CURL(nn.Module):
@@ -1802,7 +1850,6 @@ class RI2R(nn.Module):
 		super().__init__()
 
 		self.Wz = nn.Parameter(torch.rand(z_dim, z_dim + action_shape))
-		self.Wr = nn.Parameter(torch.rand(1, z_dim + action_shape))
 		self.encoder = critic.encoder
 		self.encoder_target = critic_target.encoder
 
@@ -1812,16 +1859,20 @@ class RI2R(nn.Module):
 		z = torch.cat([self.encoder(s), a], dim=1)
 		z_hat = torch.matmul(z, self.Wz.T)
 
-
+		# projection of rewards
+		# z_online = self.encoder(crops['obs_anchor'].to('cuda:0'))
+		# r_online = r
+		#
 		# idxs = np.random.choice(128, 128, replace=False)
-		# shuffled_z = self.encoder(crops['obs_anchor'][idxs].to('cuda:0'))
-		# shuffled_r = r[idxs]
+		# z_target = self.encoder_target(crops['obs_anchor'][idxs].to('cuda:0')).detach()
+		# r_target = r[idxs]
+
 		#
 		# encoded_z = self.encoder_target(crops['obs_pos'].to('cuda')).detach()
 
-		shuffled_z = None
-		shuffled_r = None
-		encoded_z = None
+		# shuffled_z = None
+		# shuffled_r = None
+		# encoded_z = None
 
 		#
 		# z_one = torch.cat([self.encoder(crops['obses'].to('cuda:0')), a, dim=1])
@@ -1830,7 +1881,7 @@ class RI2R(nn.Module):
 		# 				   dim=1])
 		# r_hat = torch.matmul(z, self.Wr.T)
 
-		return z_, z_hat, shuffled_z, shuffled_r, encoded_z
+		return z_, z_hat #, z_online, r_online.reshape((-1, 1)), z_target, r_target.reshape((-1, 1))
 
 	def compute(self):
 		pass

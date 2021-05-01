@@ -76,10 +76,10 @@ class ReplayMemory:
 			# obses = center_crop_image(obses.numpy(), 84)
 			# next_obses = center_crop_image(next_obses.numpy(), 84)
 			# pos = center_crop_image(pos.numpy(), 84)
-
-			obses = torch.tensor(obses)
-			next_obses = torch.tensor(next_obses)
-			pos = torch.tensor(pos)
+			#
+			# obses = torch.tensor(obses)
+			# next_obses = torch.tensor(next_obses)
+			# pos = torch.tensor(pos)
 			cpc_kwargs = dict(
 				obs_anchor=obses, obs_pos=pos,
 				time_anchor=None, time_pos=None

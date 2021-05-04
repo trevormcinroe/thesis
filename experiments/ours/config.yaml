@@ -27,7 +27,7 @@ frame_stack: 3
 # global params
 lr: 1e-3
 # IMPORTANT: please use a batch size of 512 to reproduce the results in the paper. Hovewer, with a smaller batch size it still works well.
-batch_size: 512
+batch_size: 128
 
 # agent configuration
 agent:
@@ -45,10 +45,11 @@ agent:
     init_temperature: 0.1
     lr: ${lr}
     actor_update_frequency: 2
-    critic_tau: 0.99
+    critic_tau: 0.05
     critic_target_update_frequency: 2
     batch_size: ${batch_size}
-    osl_update_frequency: 10
+    osl_update_frequency: 1
+    k: 5
 
 critic:
   class: osl.Critic
@@ -72,9 +73,13 @@ encoder:
   params:
       obs_shape: ${agent.params.obs_shape}
       feature_dim: 50
-#
+
 osl:
   class: osl.OSL
+  params:
+    critic_online: ???
+    critic_momentum: ???
+    action_shape: ???
 
 
 

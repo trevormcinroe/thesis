@@ -1,3 +1,8 @@
+"""
+We normalize activations to lie in [0,1] at the output of the convolutional encoder and transition model,
+as in Schrittwieser et al. (2020)
+"""
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -8,7 +13,8 @@ from torch.nn.utils import clip_grad_norm_
 import utils
 import hydra
 
-DROPOUT = 0.5
+DROPOUT = 0.0
+DROPOUT_FC = 0.0
 
 class Encoder(nn.Module):
     """Convolutional encoder for image-based observations."""
@@ -19,7 +25,7 @@ class Encoder(nn.Module):
         self.num_layers = 4
         self.num_filters = 32
         self.output_dim = 35
-        self.output_logits = False
+        self.output_logits = True
         self.feature_dim = feature_dim
 
         self.convs = nn.ModuleList([
@@ -62,6 +68,7 @@ class Encoder(nn.Module):
             h = h.detach()
         out = self.head(h)
         if not self.output_logits:
+            # out = torch.sigmoid(out)
             out = torch.tanh(out)
 
         self.outputs['out'] = out
@@ -173,28 +180,34 @@ class Critic(nn.Module):
 
 
 class DenseTrans(nn.Module):
-    def __init__(self, action_shape):
+    def __init__(self, critic):
         super().__init__()
 
-        # self.conv_trunk = nn.ModuleList([
-        #     nn.Conv2d(32, 32, 3, stride=2),
-        #     nn.BatchNorm2d(32),
-        #     nn.ReLU(),
-        #     nn.Conv2d(32, 32, 3, stride=2),
-        #     nn.ReLU()
-        # ])
+        # self.q1 = critic.Q1[0:3]
+        # self.q2 = critic.Q2[0:3]
+        self.q1 = critic.Q1[0:1]
+        self.q2 = critic.Q2[0:1]
 
         self.dense_head = nn.ModuleList([
-            nn.Linear(50 + action_shape, 512),
+            nn.Linear(1024, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
-            nn.Linear(512, 50),
-            nn.ReLU()
+            nn.Dropout(DROPOUT_FC),
+            nn.Linear(512, 50)
         ])
+
+        self.apply(utils.weight_init)
 
     def forward(self, h, a):
         """Takes the hidden feature maps from an encoder and outputs <B x 32 x 8 x 8> or <B x 2048>
         """
         h = torch.cat([h, a], dim=-1)
+
+        h1 = self.q1(h)
+        h2 = self.q2(h)
+
+        h = (h1 + h2) / 2
+
         for layer in self.dense_head:
             h = layer(h)
 
@@ -205,17 +218,37 @@ class ProjectionHead(nn.Module):
     """Uses the first two layers of the critics before data enters here..."""
     def __init__(self, ):
         super().__init__()
+
         self.proj_head = nn.ModuleList([
             nn.Linear(50, 512),
+            nn.LayerNorm(512),
             nn.ReLU(),
+            nn.Dropout(DROPOUT_FC),
             nn.Linear(512, 50),
-            nn.ReLU()
         ])
 
+        self.apply(utils.weight_init)
+
     def forward(self, x):
+
         for layer in self.proj_head:
             x = layer(x)
         return x
+
+class RewardPredictor(nn.Module):
+    """Rewards are not [0,1] due to frame-skipping..."""
+    def __init__(self, z_dim, action_shape):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(z_dim + action_shape, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+
+    def forward(self, z, a):
+        z = torch.cat([z, a], dim=1)
+        r_hat = self.net(z)
+        return r_hat
 
 
 class OSL(nn.Module):
@@ -230,7 +263,7 @@ class OSL(nn.Module):
         self.encoder_online = critic_online.encoder
         self.encoder_momentum = critic_momentum.encoder
 
-        self.transition_model = DenseTrans(action_shape)
+        self.transition_model = DenseTrans(critic_online)
 
         self.proj_online = ProjectionHead()
         self.proj_momentum = ProjectionHead()
@@ -238,6 +271,10 @@ class OSL(nn.Module):
         self.proj_momentum.load_state_dict(self.proj_online.state_dict())
 
         self.Wz = nn.Linear(50, 50, bias=False)
+
+        self.Wsingle = nn.Linear(50 + action_shape, 50)
+
+        self.Wr = RewardPredictor(50, action_shape)
 
 
     def encode(self, s, s_):
@@ -251,14 +288,15 @@ class OSL(nn.Module):
         return h
 
     def projection(self, h, h_):
-
         projection = self.proj_online(h)
         projection_ = self.proj_momentum(h_).detach()
 
         return projection, projection_
 
     def predict(self, projection):
-        return self.Wz(projection)
+        z_hat = self.Wz(projection)
+
+        return z_hat
 
 
 class DRQAgent(object):
@@ -266,7 +304,7 @@ class DRQAgent(object):
     def __init__(self, obs_shape, action_shape, action_range, device,
                  encoder_cfg, critic_cfg, actor_cfg, discount,
                  init_temperature, lr, actor_update_frequency, critic_tau,
-                 critic_target_update_frequency, batch_size, osl_update_frequency):
+                 critic_target_update_frequency, batch_size, osl_update_frequency, k):
         self.action_range = action_range
         self.device = device
         self.discount = discount
@@ -275,6 +313,7 @@ class DRQAgent(object):
         self.critic_target_update_frequency = critic_target_update_frequency
         self.batch_size = batch_size
         self.osl_update_frequency = osl_update_frequency
+        self.k = k
 
         self.actor = hydra.utils.instantiate(actor_cfg).to(self.device)
 
@@ -311,12 +350,15 @@ class DRQAgent(object):
         self.osl = OSL(self.critic, self.critic_target, action_shape[0]).to(self.device)
         self.osl_optimizer = torch.optim.Adam(self.osl.parameters(), lr=1e-4)
         self.byol_loss = byol_loss
+        self.spr_loss = spr_loss
 
         self.encoder_optimizer = torch.optim.Adam(
-            self.critic.encoder.parameters(), lr=1e-4
+            self.critic.encoder.parameters(), lr=1e-3
         )
 
         # print(self.osl)
+
+        self.osl_loss_hist = []
 
     def train(self, training=True):
         self.training = training
@@ -350,8 +392,6 @@ class DRQAgent(object):
                                  target_Q2) - self.alpha.detach() * log_prob
             target_Q = reward + (not_done * self.discount * target_V)
 
-
-            # for _ in range(9):
             # dist_aug = self.actor(next_obs_aug)
             # next_action_aug = dist_aug.rsample()
             # log_prob_aug = dist_aug.log_prob(next_action_aug).sum(-1,
@@ -362,10 +402,6 @@ class DRQAgent(object):
             #     target_Q1, target_Q2) - self.alpha.detach() * log_prob_aug
             # target_Q_aug = reward + (not_done * self.discount * target_V)
             #
-            # target_Q = target_Q + target_Q_aug
-            #
-            # # target_Q = target_Q / 10
-            #
             # target_Q = (target_Q + target_Q_aug) / 2
 
         # get current Q estimates
@@ -373,7 +409,6 @@ class DRQAgent(object):
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
             current_Q2, target_Q)
 
-        # for _ in range(10):
         # Q1_aug, Q2_aug = self.critic(obs_aug, action)
         #
         # critic_loss += F.mse_loss(Q1_aug, target_Q) + F.mse_loss(
@@ -420,23 +455,87 @@ class DRQAgent(object):
         self.log_alpha_optimizer.step()
 
     def update_osl(self, obs, a, next_obs):
-        h, h_ = self.osl.encode(obs, next_obs)
+        self.osl.train(True)
 
-        h = self.osl.transition(h, a)
+        # h, h_ = self.osl.encode(obs, next_obs)
+        #
+        # h = self.osl.transition(h, a)
+        #
+        # projection, projection_ = self.osl.projection(h, h_)
+        #
+        # projection_hat = self.osl.predict(projection)
+        #
+        # loss = self.byol_loss(projection_hat, projection_).mean() * 2
+        #
+        # # loss = self.spr_loss(projection_hat, projection_) * 2
+        # self.osl_loss_hist.append(loss.item())
+        # print(loss.item())
 
-        projection, projection_ = self.osl.projection(h, h_)
+        z_ = self.osl.encoder_momentum(next_obs).detach()
 
-        projection_hat = self.osl.predict(projection)
+        z = self.osl.encoder_online(obs)
+        z_hat = self.osl.Wsingle(torch.cat([z, a]))
 
-        loss = self.byol_loss(projection_hat, projection_).mean() * 2
+        loss = self.byol_loss(z_hat, z_).mean()
+
+        self.osl_loss_hist.append(loss.item())
 
         self.osl_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
 
         loss.backward()
 
-        clip_grad_norm_(self.osl.parameters(), 10)
-        clip_grad_norm_(self.critic.encoder.parameters(), 10)
+        # clip_grad_norm_(self.osl.parameters(), 10)
+        # clip_grad_norm_(self.critic.encoder.parameters(), 10)
+
+        self.osl_optimizer.step()
+        self.encoder_optimizer.step()
+
+    def update_osl_traj(self, replay_buffer):
+        """Gets very low (1e-5) very quickly!"""
+        self.osl.train(True)
+
+        obses, actions, obses_next, rewards = replay_buffer.sample_traj(self.batch_size, self.k)
+
+        loss = 0
+        r_loss = 0
+        z_o = self.osl.encoder_online(obses[:, 0, :, :, :])
+
+        for i in range(self.k):
+            # encoded
+            z_m = self.osl.encoder_momentum(obses_next[:, i, :, :, :]).detach()
+
+            # transition model
+            z_o = self.osl.transition(z_o, actions[:, i])
+
+            # # projections
+            z_bar_o = self.osl.proj_online(z_o)
+            z_bar_m = self.osl.proj_momentum(z_m).detach()
+
+            # prediction
+            z_hat_o = self.osl.predict(z_bar_o)
+
+            # reward_pred
+            # r_hat = self.osl.Wr(self.osl.encoder_online(obses[:, 0, :, :, :]), actions[:, i])
+            # loss
+            loss += self.byol_loss(z_hat_o, z_bar_m).mean()
+            # loss += self.spr_loss(z_hat_o, z_bar_m)
+            # r_loss += F.mse_loss(r_hat, rewards[:, i])
+
+        # if np.random.rand() < 0.05:
+        #     print(f'L: {loss.item()}, R: {r_loss.item()}')
+
+        self.osl_loss_hist.append(loss.item())
+
+        combined_loss = loss# + (r_loss / self.k) #/ self.k
+
+        self.osl_optimizer.zero_grad()
+        self.encoder_optimizer.zero_grad()
+
+        combined_loss.backward()
+
+        # clip_grad_norm_(self.osl.parameters(), 10)
+        # clip_grad_norm_(self.critic.encoder.parameters(), 10)
 
         self.osl_optimizer.step()
         self.encoder_optimizer.step()
@@ -449,30 +548,32 @@ class DRQAgent(object):
 
         self.update_critic(obs, obs_aug, action, reward, next_obs,
                            next_obs_aug, not_done, logger, step)
-
-        # for _ in range(2):
+        #
         if step % self.osl_update_frequency == 0:
-            self.update_osl(obs, action, next_obs)
+            # for _ in range(2):
+            # self.update_osl(obs, action, next_obs)
+            self.update_osl_traj(replay_buffer)
 
         if step % self.actor_update_frequency == 0:
             self.update_actor_and_alpha(obs, logger, step)
 
         if step % self.critic_target_update_frequency == 0:
             utils.soft_update_params(self.critic.Q1, self.critic_target.Q1,
-                                     0.05)
+                                     0.01)
             utils.soft_update_params(self.critic.Q2, self.critic_target.Q2,
-                                     0.05)
+                                     0.01)
             utils.soft_update_params(self.osl.proj_online, self.osl.proj_momentum,
-                                     0.99)
+                                     0.05)
             utils.soft_update_params(self.osl.encoder_online, self.osl.encoder_momentum,
-                                     0.99)
+                                     0.05)
 
         # self.update_hidden(obs, next_obs)
 
     def pretrain(self, replay_buffer, step):
-        obs, action, reward, next_obs, not_done, obs_copy, next_obs_copy = replay_buffer.sample(self.batch_size)
+        # obs, action, reward, next_obs, not_done, obs_copy, next_obs_copy = replay_buffer.sample(self.batch_size)
 
-        self.update_osl(obs, action, next_obs)
+        # self.update_osl(obs, action, next_obs)
+        self.update_osl_traj(replay_buffer)
 
         # z = torch.FloatTensor(self.batch_size, self.critic.encoder.feature_dim).uniform_(0.8, 1.2).to(self.device)
         # z_two = torch.FloatTensor(self.batch_size, self.critic.encoder.feature_dim).uniform_(0.8, 1.2).to(self.device)
@@ -493,4 +594,13 @@ def byol_loss(x, y):
 def spr_loss(x, y):
     x = F.normalize(x, dim=-1, p=2)
     y = F.normalize(y, dim=-1, p=2)
-    return
+    l = 0
+    for i in range(x.shape[0]):
+        l += torch.dot(x[i], y[i].T)
+    return -l
+
+def spr_loss(x, y):
+    x = F.normalize(x, dim=-1, p=2, eps=1e-3)
+    y = F.normalize(y, dim=-1, p=2, eps=1e-3)
+    loss = F.mse_loss(x, y, reduction='none').sum(dim=-1).mean(0)
+    return loss

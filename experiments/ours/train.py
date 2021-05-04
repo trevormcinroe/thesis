@@ -79,6 +79,7 @@ class Workspace(object):
             float(self.env.action_space.low.min()),
             float(self.env.action_space.high.max())
         ]
+
         self.agent = hydra.utils.instantiate(cfg.agent)
 
         self.replay_buffer = ReplayBuffer(self.env.observation_space.shape,
@@ -115,6 +116,10 @@ class Workspace(object):
             while not done:
                 with utils.eval_mode(self.agent):
                     action = self.agent.act(obs, sample=False)
+
+                # This is unnecessary here...
+                self.agent.osl.train(True)
+
                 obs, reward, done, info = self.env.step(action)
                 # self.video_recorder.record(self.env)
                 episode_reward += reward
@@ -131,36 +136,41 @@ class Workspace(object):
         episode, episode_reward, episode_step, done = 0, 0, 1, True
         start_time = time.time()
 
-        # pretrained = False
-
-        # print(self.agent.osl)
-
-        print('collecting...')
-        for _ in tqdm(range(10000)):
-            if done:
-                obs = self.env.reset()
-                done = False
-
-            action = self.env.action_space.sample()
-            next_obs, reward, done, info = self.env.step(action)
-            done = float(done)
-            done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
-            episode_reward += reward
-
-            self.replay_buffer.add(obs, action, reward, next_obs, done,
-                                   done_no_max)
-            obs = next_obs
-
-        print('pre-training...')
-        for i in tqdm(range(50000)):
-            self.agent.pretrain(self.replay_buffer, i)
-
-        # reset replay buffer?
-        self.replay_buffer = ReplayBuffer(self.env.observation_space.shape,
-                                          self.env.action_space.shape,
-                                          100000,
-                                          self.cfg.image_pad,
-                                          self.device)
+        # print('collecting...')
+        # for _ in tqdm(range(25000)):
+        #     if done:
+        #         obs = self.env.reset()
+        #         done = False
+        #         episode_step = 0
+        #
+        #     action = self.env.action_space.sample()
+        #     next_obs, reward, done, info = self.env.step(action)
+        #
+        #     done = float(done)
+        #     done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
+        #
+        #     if done:
+        #         eeo = 1
+        #     else:
+        #         eeo = 0
+        #
+        #     episode_reward += reward
+        #
+        #     self.replay_buffer.add(obs, action, reward, next_obs, done,
+        #                            done_no_max, eeo)
+        #     obs = next_obs
+        #     episode_step += 1
+        #
+        # print('pre-training...')
+        # for i in tqdm(range(50000)):
+        #     self.agent.pretrain(self.replay_buffer, i)
+        #
+        # # reset replay buffer?
+        # self.replay_buffer = ReplayBuffer(self.env.observation_space.shape,
+        #                                   self.env.action_space.shape,
+        #                                   100000,
+        #                                   self.cfg.image_pad,
+        #                                   self.device)
 
         while self.step < (self.cfg.num_train_steps // self.cfg.action_repeat):
             if done:
@@ -176,12 +186,19 @@ class Workspace(object):
                     self.logger.log('eval/episode', episode, self.step)
                     self.evaluate()
 
+                    print(f'OSL: {np.mean(self.agent.osl_loss_hist[-20000:])}')
+                    torch.save(
+                        self.agent.critic.encoder.state_dict(),
+                        f'/media/trevor/mariadb/thesis/drq_cartpole_encoder_{self.step * self.cfg.action_repeat}.pt'
+                    )
+
                 self.logger.log('train/episode_reward', episode_reward,
                                 self.step)
 
                 obs = self.env.reset()
                 done = False
                 episode_reward = 0
+                # TODO: at the very top, episode_step is init to 1 but here it is 0...
                 episode_step = 0
                 episode += 1
 
@@ -194,6 +211,8 @@ class Workspace(object):
                 with utils.eval_mode(self.agent):
                     action = self.agent.act(obs, sample=True)
 
+            self.agent.osl.train(True)
+
             # run training update
             if self.step >= self.cfg.num_seed_steps:
                 for _ in range(self.cfg.num_train_iters):
@@ -203,16 +222,24 @@ class Workspace(object):
             next_obs, reward, done, info = self.env.step(action)
 
             # allow infinite bootstrap
+            # TODO: shouldn't DONE always be 0? replay buffer is NOT DONE when adding...
             done = float(done)
             done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
             episode_reward += reward
 
+            if done:
+                eeo = 1
+            else:
+                eeo = 0
+
+            # done_no_max should always be 0, right?
             self.replay_buffer.add(obs, action, reward, next_obs, done,
-                                   done_no_max)
+                                   done_no_max, eeo)
 
             obs = next_obs
             episode_step += 1
             self.step += 1
+
 
 
 @hydra.main(config_path='config.yaml', strict=True)

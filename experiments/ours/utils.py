@@ -212,3 +212,77 @@ def center_translate(image, size):
     w1 = (size - w) // 2
     outs[:, h1:h1 + h, w1:w1 + w] = image
     return outs
+
+
+class ResultsPlotter:
+    def __init__(self, homedir):
+        self.homedir = homedir
+        self.all_files = os.listdir(homedir)
+        self.x_ticks = np.linspace(0, .5, 26)
+        self.means = dict()
+        self.sds = dict()
+
+        self._init_mpl()
+
+    def _init_mpl(self):
+        plt.rcParams['figure.dpi'] = 300
+        plt.rcParams['font.size'] = 8
+        plt.rcParams['legend.fontsize'] = 7
+        plt.rcParams['legend.loc'] = 'lower right'
+        plt.rcParams['figure.facecolor'] = '#FFFFFF'
+        plt.style.use('bmh')
+
+    def _get_files(self, patterns):
+        remaining = self.all_files
+
+        for pat in patterns:
+            remaining = [x for x in remaining if pat in x]
+
+        means = [x for x in remaining if 'mean' in x]
+        sds = [x for x in remaining if 'sd' in x]
+        print(means)
+        means_, sds_ = [], []
+
+        for file in means:
+            with open(self.homedir + '/' + file, 'rb') as f:
+                means_.append(pickle.load(f))
+
+        #         for file in sds:
+        #             with open(self.homedir + '/' + file, 'rb') as f:
+        #                 sds_.append(pickle.load(f))
+        return np.array(means_), np.array(sds_)
+
+    def plot(self, info):
+        fig, ax = plt.subplots(1, 1)
+
+        for info_set in info['patterns']:
+            means, sds = self._get_files(patterns=info_set)
+
+            if f'drq-{info["env"]}-mea' in info_set:
+                max_ = .496
+            else:
+                max_ = .5
+
+            plt.plot(np.linspace(0, max_, len(means[0])), np.mean(means, axis=0))
+            plt.fill_between(
+                np.linspace(0, max_, len(means[0])),
+                np.mean(means, axis=0) + np.std(means, axis=0),
+                np.mean(means, axis=0) - np.std(means, axis=0),
+                alpha=0.25
+            )
+
+        plt.legend(*info['agents'])
+        ax.set_xlabel('Environment Steps ($\\times 10^6%$)')
+        ax.set_ylabel('Episode Return')
+        ax.set_title(f'{info["env"]}')
+
+# a = ResultsPlotter('/media/trevor/mariadb/thesis')
+# info = {
+#     'env': 'Cheetah Run',
+#     'patterns': [['msl-drq-ch', 'pFalse', 'k3']],
+#     #                  ['msl-drq-ch', 'pFalse', 'k3'],
+#     #                  ['msl-drq-ch', 'pFalse', 'k1']],
+#     'agents': [['KSL[k=3]']]
+#
+# }
+# a.plot(info)

@@ -13,7 +13,7 @@ num_seed_steps: 1000
 replay_buffer_capacity: 100000
 seed: 1
 # eval
-eval_frequency: 2500
+eval_frequency: 20000
 num_eval_episodes: 10
 # misc
 log_frequency_step: 10000
@@ -22,12 +22,16 @@ save_video: true
 device: cuda
 # observation
 image_size: 84
-image_pad: 4
+image_pad: 8
 frame_stack: 3
 # global params
-lr: 1e-3
+lr: 2e-4 # RAD used 2e-4 for Cheetah, Run -- never explains why?
+
 # IMPORTANT: please use a batch size of 512 to reproduce the results in the paper. Hovewer, with a smaller batch size it still works well.
 batch_size: 128
+
+# experiment name
+p: false
 
 # agent configuration
 agent:

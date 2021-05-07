@@ -9,9 +9,11 @@ import utils
 
 class ReplayBuffer(object):
     """Buffer to store environment transitions."""
-    def __init__(self, obs_shape, action_shape, capacity, image_pad, device):
+    def __init__(self, obs_shape, action_shape, capacity, image_pad, device, env):
         self.capacity = capacity
         self.device = device
+        self.env = env
+        self.image_pad = image_pad
 
         self.aug_trans = nn.Sequential(
             nn.ReplicationPad2d(image_pad),
@@ -99,12 +101,24 @@ class ReplayBuffer(object):
         # obses_next = np.array([
         #     self.aug_trans(torch.tensor(self.next_obses[traj_idxs[i]]).float()).numpy() for i in range(batch_size)
         # ])
+        #
+        # if self.env == 'cheetah_run':
+        #     obses = np.array([
+        #         random_crop(random_translate(self.obses[traj_idxs[i]], 100)) for i in range(batch_size)
+        #     ])
+        #     obses_next = np.array([
+        #         random_crop(random_translate(self.next_obses[traj_idxs[i]], 100)) for i in range(batch_size)
+        #     ])
+        #
+        # else:
+
         obses = np.array([
-            self.random_crop(self.obses[traj_idxs[i]]) for i in range(batch_size)
+            random_crop(self.obses[traj_idxs[i]], self.image_pad) for i in range(batch_size)
         ])
         obses_next = np.array([
-            self.random_crop(self.next_obses[traj_idxs[i]]) for i in range(batch_size)
+            random_crop(self.next_obses[traj_idxs[i]], self.image_pad) for i in range(batch_size)
         ])
+
         rewards = np.array([self.rewards[traj_idxs[i]] for i in range(batch_size)])
 
         actions = torch.as_tensor(actions, device=self.device)
@@ -115,7 +129,26 @@ class ReplayBuffer(object):
         return obses, actions, obses_next, rewards
 
 
-def random_crop(imgs, out=84):
+# ORIGINAL
+# def random_crop(imgs, image_pad, out=84):
+#     """
+#         args:
+#         imgs: np.array shape (B,C,H,W)
+#         out: output size (e.g. 84)
+#         returns np.array
+#     """
+#     n, c, h, w = imgs.shape
+#
+#     crop_max = h - out + 1
+#     w1 = np.random.randint(0, crop_max, n)
+#     h1 = np.random.randint(0, crop_max, n)
+#     cropped = np.empty((n, c, out, out), dtype=imgs.dtype)
+#     for i, (img, w11, h11) in enumerate(zip(imgs, w1, h1)):
+#         img = np.pad(img, image_pad)[image_pad:-image_pad, :, :]
+#         cropped[i] = img[:, h11:h11 + out, w11:w11 + out]
+#     return cropped
+
+def random_crop(imgs, image_pad, out=84):
     """
         args:
         imgs: np.array shape (B,C,H,W)
@@ -123,11 +156,23 @@ def random_crop(imgs, out=84):
         returns np.array
     """
     n, c, h, w = imgs.shape
-    crop_max = h - out + 1
+    crop_max = h + (image_pad * 2) - out + 1
     w1 = np.random.randint(0, crop_max, n)
     h1 = np.random.randint(0, crop_max, n)
     cropped = np.empty((n, c, out, out), dtype=imgs.dtype)
     for i, (img, w11, h11) in enumerate(zip(imgs, w1, h1)):
-        img = np.pad(img, 4)
+        img = np.pad(img, image_pad, mode='constant')[image_pad:-image_pad, :, :]
         cropped[i] = img[:, h11:h11 + out, w11:w11 + out]
     return cropped
+
+def random_translate(imgs, size, return_random_idxs=False, h1s=None, w1s=None):
+    n, c, h, w = imgs.shape
+    assert size >= h and size >= w
+    outs = np.zeros((n, c, size, size), dtype=imgs.dtype)
+    h1s = np.random.randint(0, size - h + 1, n) if h1s is None else h1s
+    w1s = np.random.randint(0, size - w + 1, n) if w1s is None else w1s
+    for out, img, h1, w1 in zip(outs, imgs, h1s, w1s):
+        out[:, h1:h1 + h, w1:w1 + w] = img
+    if return_random_idxs:  # So can do the same to another set of imgs.
+        return outs, dict(h1s=h1s, w1s=w1s)
+    return outs

@@ -6,7 +6,7 @@ import sys
 import time
 
 import numpy as np
-
+import pickle
 import dmc2gym
 import hydra
 import torch
@@ -86,7 +86,8 @@ class Workspace(object):
                                           self.env.action_space.shape,
                                           cfg.replay_buffer_capacity,
                                           self.cfg.image_pad,
-                                          self.device)
+                                          self.device,
+                                          self.cfg.env)
 
         # obs_shape = (3 * 3, 84, 84)
         # pre_aug_obs_shape = (3 * 3, 100, 100)
@@ -107,6 +108,7 @@ class Workspace(object):
 
     def evaluate(self):
         average_episode_reward = 0
+        eps_reward = []
         for episode in range(self.cfg.num_eval_episodes):
             obs = self.env.reset()
             # self.video_recorder.init(enabled=(episode == 0))
@@ -125,52 +127,66 @@ class Workspace(object):
                 episode_reward += reward
                 episode_step += 1
 
+            eps_reward.append(episode_reward)
+
             average_episode_reward += episode_reward
             # self.video_recorder.save(f'{self.step}.mp4')
         average_episode_reward /= self.cfg.num_eval_episodes
+        sd_episode_reward = np.std(eps_reward)
         self.logger.log('eval/episode_reward', average_episode_reward,
                         self.step)
         self.logger.dump(self.step)
+        return average_episode_reward, sd_episode_reward
 
     def run(self):
+        print(f'Eval freq: {self.cfg.eval_frequency}')
+        print(f'k: {self.agent.k}')
+        print(f'lr: {self.cfg.lr}')
+
         episode, episode_reward, episode_step, done = 0, 0, 1, True
         start_time = time.time()
 
-        # print('collecting...')
-        # for _ in tqdm(range(25000)):
-        #     if done:
-        #         obs = self.env.reset()
-        #         done = False
-        #         episode_step = 0
-        #
-        #     action = self.env.action_space.sample()
-        #     next_obs, reward, done, info = self.env.step(action)
-        #
-        #     done = float(done)
-        #     done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
-        #
-        #     if done:
-        #         eeo = 1
-        #     else:
-        #         eeo = 0
-        #
-        #     episode_reward += reward
-        #
-        #     self.replay_buffer.add(obs, action, reward, next_obs, done,
-        #                            done_no_max, eeo)
-        #     obs = next_obs
-        #     episode_step += 1
-        #
-        # print('pre-training...')
-        # for i in tqdm(range(50000)):
-        #     self.agent.pretrain(self.replay_buffer, i)
-        #
-        # # reset replay buffer?
-        # self.replay_buffer = ReplayBuffer(self.env.observation_space.shape,
-        #                                   self.env.action_space.shape,
-        #                                   100000,
-        #                                   self.cfg.image_pad,
-        #                                   self.device)
+        if self.cfg.p:
+
+            print('collecting...')
+            for _ in tqdm(range(10000)):
+                if done:
+                    obs = self.env.reset()
+                    done = False
+                    episode_step = 0
+
+                action = self.env.action_space.sample()
+                next_obs, reward, done, info = self.env.step(action)
+
+                done = float(done)
+                done_no_max = 0 if episode_step + 1 == self.env._max_episode_steps else done
+
+                if done:
+                    eeo = 1
+                else:
+                    eeo = 0
+
+                episode_reward += reward
+
+                self.replay_buffer.add(obs, action, reward, next_obs, done,
+                                       done_no_max, eeo)
+                obs = next_obs
+                episode_step += 1
+
+            print('pre-training...')
+            for i in tqdm(range(25000)):
+                self.agent.pretrain(self.replay_buffer, i)
+
+            # reset replay buffer?
+            self.replay_buffer = ReplayBuffer(self.env.observation_space.shape,
+                                              self.env.action_space.shape,
+                                              100000,
+                                              self.cfg.image_pad,
+                                              self.device,
+                                              self.cfg.env)
+
+        eval_mean = []
+        eval_sd = []
 
         while self.step < (self.cfg.num_train_steps // self.cfg.action_repeat):
             if done:
@@ -184,13 +200,16 @@ class Workspace(object):
                 # evaluate agent periodically
                 if self.step % self.cfg.eval_frequency == 0:
                     self.logger.log('eval/episode', episode, self.step)
-                    self.evaluate()
+
+                    means, sds = self.evaluate()
+                    eval_mean.append(means)
+                    eval_sd.append(sds)
 
                     print(f'OSL: {np.mean(self.agent.osl_loss_hist[-20000:])}')
-                    torch.save(
-                        self.agent.critic.encoder.state_dict(),
-                        f'/media/trevor/mariadb/thesis/drq_cartpole_encoder_{self.step * self.cfg.action_repeat}.pt'
-                    )
+                    # torch.save(
+                    #     self.agent.critic.encoder.state_dict(),
+                    #     f'/media/trevor/mariadb/thesis/msl_cartpole_encoder_{self.step * self.cfg.action_repeat}.pt'
+                    # )
 
                 self.logger.log('train/episode_reward', episode_reward,
                                 self.step)
@@ -240,12 +259,23 @@ class Workspace(object):
             episode_step += 1
             self.step += 1
 
+        with open(f'/media/trevor/mariadb/thesis/msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-mean.data', 'wb') as f:
+            pickle.dump(eval_mean, f)
+
+        with open(f'/media/trevor/mariadb/thesis/msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-sd.data', 'wb') as f:
+            pickle.dump(eval_sd, f)
 
 
 @hydra.main(config_path='config.yaml', strict=True)
 def main(cfg):
     from train import Workspace as W
     workspace = W(cfg)
+
+    # import time
+    # print('waiting...')
+    # time.sleep(9000)
+    # print('done waiting!')
+
     workspace.run()
 
 

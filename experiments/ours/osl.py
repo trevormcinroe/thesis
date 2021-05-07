@@ -353,7 +353,7 @@ class DRQAgent(object):
         self.spr_loss = spr_loss
 
         self.encoder_optimizer = torch.optim.Adam(
-            self.critic.encoder.parameters(), lr=1e-3
+            self.critic.encoder.parameters(), lr=lr
         )
 
         # print(self.osl)
@@ -392,27 +392,27 @@ class DRQAgent(object):
                                  target_Q2) - self.alpha.detach() * log_prob
             target_Q = reward + (not_done * self.discount * target_V)
 
-            # dist_aug = self.actor(next_obs_aug)
-            # next_action_aug = dist_aug.rsample()
-            # log_prob_aug = dist_aug.log_prob(next_action_aug).sum(-1,
-            #                                                       keepdim=True)
-            # target_Q1, target_Q2 = self.critic_target(next_obs_aug,
-            #                                           next_action_aug)
-            # target_V = torch.min(
-            #     target_Q1, target_Q2) - self.alpha.detach() * log_prob_aug
-            # target_Q_aug = reward + (not_done * self.discount * target_V)
-            #
-            # target_Q = (target_Q + target_Q_aug) / 2
+            dist_aug = self.actor(next_obs_aug)
+            next_action_aug = dist_aug.rsample()
+            log_prob_aug = dist_aug.log_prob(next_action_aug).sum(-1,
+                                                                  keepdim=True)
+            target_Q1, target_Q2 = self.critic_target(next_obs_aug,
+                                                      next_action_aug)
+            target_V = torch.min(
+                target_Q1, target_Q2) - self.alpha.detach() * log_prob_aug
+            target_Q_aug = reward + (not_done * self.discount * target_V)
+
+            target_Q = (target_Q + target_Q_aug) / 2
 
         # get current Q estimates
         current_Q1, current_Q2 = self.critic(obs, action)
         critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(
             current_Q2, target_Q)
 
-        # Q1_aug, Q2_aug = self.critic(obs_aug, action)
-        #
-        # critic_loss += F.mse_loss(Q1_aug, target_Q) + F.mse_loss(
-        #     Q2_aug, target_Q)
+        Q1_aug, Q2_aug = self.critic(obs_aug, action)
+
+        critic_loss += F.mse_loss(Q1_aug, target_Q) + F.mse_loss(
+            Q2_aug, target_Q)
 
         logger.log('train_critic/loss', critic_loss, step)
 
@@ -527,7 +527,7 @@ class DRQAgent(object):
 
         self.osl_loss_hist.append(loss.item())
 
-        combined_loss = loss# + (r_loss / self.k) #/ self.k
+        combined_loss = loss # * self.k # + (r_loss / self.k) #/ self.k
 
         self.osl_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
@@ -552,6 +552,7 @@ class DRQAgent(object):
         if step % self.osl_update_frequency == 0:
             # for _ in range(2):
             # self.update_osl(obs, action, next_obs)
+            # for _ in range(3):
             self.update_osl_traj(replay_buffer)
 
         if step % self.actor_update_frequency == 0:
@@ -581,9 +582,9 @@ class DRQAgent(object):
         # self.update_osl(obs, action, next_obs, obs_copy, reward, z)
         if step % self.critic_target_update_frequency == 0:
             utils.soft_update_params(self.osl.proj_online, self.osl.proj_momentum,
-                                     0.99)
+                                     0.05)
             utils.soft_update_params(self.osl.encoder_online, self.osl.encoder_momentum,
-                                     0.99)
+                                     0.05)
             # utils.soft_update_params(self.osl.online, self.osl.target, 0.05)
 
 def byol_loss(x, y):

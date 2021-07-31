@@ -1,13 +1,8 @@
 <p align="center">
-  <img src="imgs/nu_logo.png" width="150">
+  <img src="imgs/nu_logo_large.png" width="150">
 </p>
 
 # Representation Learning for Data-Efficient Reinforcement Learning
-<div style="text-align:center;">
-    <img src="{{ base_path }}/images/cheetah-run.gif" border="100" style="margin: 1em 1em 1em 1em; width: 15%; height: auto;"/>
-<img src="{{ base_path }}/images/walker-walk.gif" border="100" style="margin: 1em 1em 1em 1em; width: 15%; height: auto;"/>
-</div>
-
 <p align="center">
     <img src="imgs/cheetah-run.gif" width="150">
     <img src="imgs/walker-walk.gif" width="150">

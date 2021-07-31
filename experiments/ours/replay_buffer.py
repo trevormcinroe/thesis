@@ -67,6 +67,7 @@ class ReplayBuffer(object):
         not_dones_no_max = torch.as_tensor(self.not_dones_no_max[idxs],
                                            device=self.device)
 
+        # UNCOMMENT FOR TRANSLATION
         obses = self.aug_trans(obses)
         next_obses = self.aug_trans(next_obses)
 
@@ -95,29 +96,21 @@ class ReplayBuffer(object):
             traj_idxs.append([beg + i for i in range(k)])
 
         actions = np.array([self.actions[traj_idxs[i]] for i in range(batch_size)])
-        # obses = np.array([
-        #     self.aug_trans(torch.tensor(self.obses[traj_idxs[i]]).float()).numpy() for i in range(batch_size)
-        # ])
-        # obses_next = np.array([
-        #     self.aug_trans(torch.tensor(self.next_obses[traj_idxs[i]]).float()).numpy() for i in range(batch_size)
-        # ])
-        #
-        # if self.env == 'cheetah_run':
-        #     obses = np.array([
-        #         random_crop(random_translate(self.obses[traj_idxs[i]], 100)) for i in range(batch_size)
-        #     ])
-        #     obses_next = np.array([
-        #         random_crop(random_translate(self.next_obses[traj_idxs[i]], 100)) for i in range(batch_size)
-        #     ])
-        #
-        # else:
 
+        # UNCOMMENT FOR TRANSLATION
         obses = np.array([
             random_crop(self.obses[traj_idxs[i]], self.image_pad) for i in range(batch_size)
         ])
         obses_next = np.array([
             random_crop(self.next_obses[traj_idxs[i]], self.image_pad) for i in range(batch_size)
         ])
+
+        # obses = np.array([
+        #     self.obses[traj_idxs[i]] for i in range(batch_size)
+        # ])
+        # obses_next = np.array([
+        #     self.next_obses[traj_idxs[i]] for i in range(batch_size)
+        # ])
 
         rewards = np.array([self.rewards[traj_idxs[i]] for i in range(batch_size)])
 

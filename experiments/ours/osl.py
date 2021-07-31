@@ -127,6 +127,26 @@ class Actor(nn.Module):
         dist = utils.SquashedNormal(mu, std)
         return dist
 
+    def noise(self, obs, n, detach_encoder=False):
+        obs = self.encoder(obs, detach=detach_encoder)
+
+        obs[0][np.random.choice(range(len(obs[0])), n, replace=False)] = 0
+
+        mu, log_std = self.trunk(obs).chunk(2, dim=-1)
+
+        # constrain log_std inside [log_std_min, log_std_max]
+        log_std = torch.tanh(log_std)
+        log_std_min, log_std_max = self.log_std_bounds
+        log_std = log_std_min + 0.5 * (log_std_max - log_std_min) * (log_std +
+                                                                     1)
+        std = log_std.exp()
+
+        self.outputs['mu'] = mu
+        self.outputs['std'] = std
+
+        dist = utils.SquashedNormal(mu, std)
+        return dist
+
     def log(self, logger, step):
         for k, v in self.outputs.items():
             logger.log_histogram(f'train_actor/{k}_hist', v, step)
@@ -180,21 +200,41 @@ class Critic(nn.Module):
 
 
 class DenseTrans(nn.Module):
-    def __init__(self, critic):
+    def __init__(self, critic, large_overlap=False):
         super().__init__()
 
-        # self.q1 = critic.Q1[0:3]
-        # self.q2 = critic.Q2[0:3]
-        self.q1 = critic.Q1[0:1]
-        self.q2 = critic.Q2[0:1]
+        if large_overlap:
+            self.q1 = critic.Q1[:4]
+            self.q2 = critic.Q2[:4]
 
-        self.dense_head = nn.ModuleList([
-            nn.Linear(1024, 512),
-            nn.LayerNorm(512),
-            nn.ReLU(),
-            nn.Dropout(DROPOUT_FC),
-            nn.Linear(512, 50)
-        ])
+
+            self.dense_head = nn.ModuleList([
+                nn.Linear(1024, 512),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                nn.Dropout(DROPOUT_FC),
+                nn.Linear(512, 50)
+            ])
+
+        else:
+
+            # For knowledge-sharing ablation
+            self.q1 = critic.Q1[0:1]
+            self.q2 = critic.Q2[0:1]
+            #
+            # self.q1 = nn.Linear(critic.Q1[0].in_features, critic.Q1[0].out_features)
+            # self.q2 = nn.Linear(critic.Q2[0].in_features, critic.Q2[0].out_features)
+
+
+            # For huge overlap ablation
+
+            self.dense_head = nn.ModuleList([
+                nn.Linear(1024, 512),
+                nn.LayerNorm(512),
+                nn.ReLU(),
+                nn.Dropout(DROPOUT_FC),
+                nn.Linear(512, 50)
+            ])
 
         self.apply(utils.weight_init)
 
@@ -239,6 +279,7 @@ class RewardPredictor(nn.Module):
     """Rewards are not [0,1] due to frame-skipping..."""
     def __init__(self, z_dim, action_shape):
         super().__init__()
+        print(action_shape)
         self.net = nn.Sequential(
             nn.Linear(z_dim + action_shape, 128),
             nn.ReLU(),
@@ -263,7 +304,7 @@ class OSL(nn.Module):
         self.encoder_online = critic_online.encoder
         self.encoder_momentum = critic_momentum.encoder
 
-        self.transition_model = DenseTrans(critic_online)
+        self.transition_model = DenseTrans(critic_online, False)
 
         self.proj_online = ProjectionHead()
         self.proj_momentum = ProjectionHead()
@@ -275,7 +316,7 @@ class OSL(nn.Module):
         self.Wsingle = nn.Linear(50 + action_shape, 50)
 
         self.Wr = RewardPredictor(50, action_shape)
-
+        # self.Wr = nn.Linear(50, 1, bias=False)
 
     def encode(self, s, s_):
         h = self.encoder_online(s)
@@ -359,6 +400,7 @@ class DRQAgent(object):
         # print(self.osl)
 
         self.osl_loss_hist = []
+        self.r_loss_hist = []
 
     def train(self, training=True):
         self.training = training
@@ -379,6 +421,16 @@ class DRQAgent(object):
         action = action.clamp(*self.action_range)
         assert action.ndim == 2 and action.shape[0] == 1
         return utils.to_np(action[0])
+
+    def act_noise(self, obs, n, sample=False):
+        obs = torch.FloatTensor(obs).to(self.device)
+        obs = obs.unsqueeze(0)
+        dist = self.actor.noise(obs, n=n)
+        action = dist.sample() if sample else dist.mean
+        action = action.clamp(*self.action_range)
+        assert action.ndim == 2 and action.shape[0] == 1
+        return utils.to_np(action[0])
+
 
     def update_critic(self, obs, obs_aug, action, reward, next_obs,
                       next_obs_aug, not_done, logger, step):
@@ -508,6 +560,9 @@ class DRQAgent(object):
             # transition model
             z_o = self.osl.transition(z_o, actions[:, i])
 
+            # reward prediction
+            r_hat = self.osl.Wr(z_o)
+
             # # projections
             z_bar_o = self.osl.proj_online(z_o)
             z_bar_m = self.osl.proj_momentum(z_m).detach()
@@ -519,6 +574,7 @@ class DRQAgent(object):
             # r_hat = self.osl.Wr(self.osl.encoder_online(obses[:, 0, :, :, :]), actions[:, i])
             # loss
             loss += self.byol_loss(z_hat_o, z_bar_m).mean()
+            r_loss += F.mse_loss(r_hat, rewards[:, i])
             # loss += self.spr_loss(z_hat_o, z_bar_m)
             # r_loss += F.mse_loss(r_hat, rewards[:, i])
 
@@ -526,8 +582,9 @@ class DRQAgent(object):
         #     print(f'L: {loss.item()}, R: {r_loss.item()}')
 
         self.osl_loss_hist.append(loss.item())
+        self.r_loss_hist.append(r_loss.item())
 
-        combined_loss = loss # * self.k # + (r_loss / self.k) #/ self.k
+        combined_loss = loss + r_loss # * self.k # + (r_loss / self.k) #/ self.k
 
         self.osl_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
@@ -586,6 +643,32 @@ class DRQAgent(object):
             utils.soft_update_params(self.osl.encoder_online, self.osl.encoder_momentum,
                                      0.05)
             # utils.soft_update_params(self.osl.online, self.osl.target, 0.05)
+
+    def save(self, dir, extras):
+        torch.save(
+            self.actor.state_dict(), dir + extras + '_actor.pt'
+        )
+
+        torch.save(
+            self.critic.state_dict(), dir + extras + '_critic.pt'
+        )
+
+        torch.save(
+            self.osl.state_dict(), dir + extras + '_osl.pt'
+        )
+
+    def load(self, dir, extras):
+        self.actor.load_state_dict(
+            torch.load(dir + extras + '_actor.pt')
+        )
+
+        self.critic.load_state_dict(
+            torch.load(dir + extras + '_critic.pt')
+        )
+
+        self.osl.load_state_dict(
+            torch.load(dir + extras + '_osl.pt')
+        )
 
 def byol_loss(x, y):
     x = F.normalize(x, dim=-1, p=2)

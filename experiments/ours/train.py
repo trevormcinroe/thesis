@@ -1,3 +1,7 @@
+import sys
+sys.path.append('../')
+sys.path.append('../../')
+
 import copy
 import math
 import os
@@ -8,6 +12,7 @@ import time
 import numpy as np
 import pickle
 import dmc2gym
+from experiments import dmc2gym_noisy
 import hydra
 import torch
 import torch.nn as nn
@@ -30,6 +35,12 @@ def make_env(cfg):
     elif cfg.env == 'point_mass_easy':
         domain_name = 'point_mass'
         task_name = 'easy'
+    elif cfg.env == 'cartpole_two_poles':
+        domain_name = 'cartpole'
+        task_name = 'two_poles'
+    elif cfg.env == 'cartpole_three_poles':
+        domain_name = 'cartpole'
+        task_name = 'three_poles'
     else:
         domain_name = cfg.env.split('_')[0]
         task_name = '_'.join(cfg.env.split('_')[1:])
@@ -46,6 +57,21 @@ def make_env(cfg):
                        width=cfg.image_size,
                        frame_skip=cfg.action_repeat,
                        camera_id=camera_id)
+
+    # env = dmc2gym_noisy.make(
+    #     domain_name=domain_name,
+    #     task_name=task_name,
+    #     resource_files='../../../../../experiments/distractors/images/*.mp4',
+    #     img_source='video',
+    #     total_frames=10000,
+    #     seed=cfg.seed,
+    #     visualize_reward=False,
+    #     from_pixels=True,
+    #     height=84,
+    #     width=84,
+    #     frame_skip=cfg.action_repeat,
+    #     camera_id=camera_id
+    # )
 
     env = utils.FrameStack(env, k=cfg.frame_stack)
 
@@ -109,6 +135,10 @@ class Workspace(object):
     def evaluate(self):
         average_episode_reward = 0
         eps_reward = []
+
+        eps_done = 0
+
+        # while eps_done < self.cfg.num_eval_episodes:
         for episode in range(self.cfg.num_eval_episodes):
             obs = self.env.reset()
             # self.video_recorder.init(enabled=(episode == 0))
@@ -127,7 +157,12 @@ class Workspace(object):
                 episode_reward += reward
                 episode_step += 1
 
-            eps_reward.append(episode_reward)
+            # if episode_reward > 0:
+            #     eps_reward.append(episode_reward)
+            #     average_episode_reward += episode_reward
+            #     eps_done += 1
+            # else:
+            #     continue
 
             average_episode_reward += episode_reward
             # self.video_recorder.save(f'{self.step}.mp4')
@@ -259,11 +294,16 @@ class Workspace(object):
             episode_step += 1
             self.step += 1
 
-        with open(f'/media/trevor/mariadb/thesis/msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-mean.data', 'wb') as f:
+        with open(f'/media/trevor/mariadb/thesis/ksl-r-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-mean.data', 'wb') as f:
             pickle.dump(eval_mean, f)
 
-        with open(f'/media/trevor/mariadb/thesis/msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-sd.data', 'wb') as f:
-            pickle.dump(eval_sd, f)
+        # with open(f'/media/trevor/mariadb/thesis/msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-sd.data', 'wb') as f:
+        #     pickle.dump(eval_sd, f)
+        #
+        # self.agent.save(
+        #     dir='/media/trevor/mariadb/thesis/',
+        #     extras=f'msl-drq-{self.cfg.env}-s{self.cfg.seed}-b{self.cfg.batch_size}-k{self.cfg.agent.params.k}-p{self.cfg.p}-noks-500k'
+        # )
 
 
 @hydra.main(config_path='config.yaml', strict=True)
@@ -271,9 +311,11 @@ def main(cfg):
     from train import Workspace as W
     workspace = W(cfg)
 
+
+    # time.sleep(60*60*4)
     # import time
     # print('waiting...')
-    # time.sleep(9000)
+    # time.sleep(4 * 60 * 60)
     # print('done waiting!')
 
     workspace.run()

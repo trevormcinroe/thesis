@@ -13,7 +13,7 @@ Deep reinforcement learning (RL) agents that exist in high-dimensional state spa
 
 ### KSL
 <p align="center">
-  <img src="imgs/ksl.png" width="700" background-color="white">
+  <img src="imgs/ksl_white_bg.png" width="700" background-color="white">
 </p>
 
 To read more about KSL, its performance, and the analysis of its latent projections, please see [my website](https://trevormcinroe.github.io/thesis/).
